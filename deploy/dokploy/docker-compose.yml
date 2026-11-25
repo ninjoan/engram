@@ -1,0 +1,48 @@
+# Personal staging deployment of Engram Cloud on Dokploy.
+# Lives only on the fork's personal/main branch; never part of upstream PRs.
+#
+# Dokploy: create a "Compose" service with source GitHub ninjoan/engram,
+# branch personal/main, compose path ./deploy/dokploy/docker-compose.yml.
+# Set every ${VAR} below in the Dokploy "Environment" tab (see .env.example).
+# Attach the domain in Dokploy to service "cloud", container port 18080, HTTPS on.
+# PostgreSQL is never published: no ports, only the internal compose network.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - engram-staging-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  cloud:
+    build:
+      context: ../..
+      dockerfile: docker/cloud/Dockerfile
+      args:
+        VERSION: ${ENGRAM_BUILD_VERSION:-personal-staging}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENGRAM_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      ENGRAM_JWT_SECRET: ${ENGRAM_JWT_SECRET}
+      ENGRAM_CLOUD_TOKEN: ${ENGRAM_CLOUD_TOKEN}
+      ENGRAM_CLOUD_ALLOWED_PROJECTS: ${ENGRAM_CLOUD_ALLOWED_PROJECTS}
+      ENGRAM_CLOUD_HOST: 0.0.0.0
+      ENGRAM_PORT: "18080"
+    expose:
+      - "18080"
+    command: ["cloud", "serve"]
+
+volumes:
+  engram-staging-pg:
