@@ -24,7 +24,8 @@ Use this checklist before operating a self-hosted Engram Cloud endpoint for user
 ### Data protection and recovery
 
 - [ ] Use durable storage for Cloud PostgreSQL data. The reference Compose file mounts `engram-cloud-pg` at `/var/lib/postgresql/data`; choose equivalent durable storage for your platform.
-- [ ] Own backups for the Cloud database, including retention, access protection, and an off-host or otherwise independent copy where appropriate for your environment. Engram does not provide backup tooling or recovery objectives.
+- [ ] Own backups for the Cloud database, including retention, access protection, and an off-host or otherwise independent copy where appropriate for your environment. Engram provides a logical export/import of Cloud data (`engram cloud backup export` / `import`, see [Cloud Backup and Restore](../../DOCS.md#cloud-backup-and-restore)); you still own where archives are stored, how long they are kept, off-host copies, and restore rehearsal. Engram does not define recovery objectives.
+- [ ] Treat backup archives as sensitive: they contain plaintext memories. Keep them at mode `0600` and encrypt them before copying them off the host. Archives never contain tokens, token hashes, password hashes, or environment secrets, so keep your secrets backed up separately.
 - [ ] Preserve local SQLite data as well. Engram is local-first: local SQLite remains authoritative and Cloud is optional replication and browser visibility.
 - [ ] Document a restore procedure that does not overwrite a live service during rehearsal.
 
@@ -32,7 +33,8 @@ Use this checklist before operating a self-hosted Engram Cloud endpoint for user
 
 ### Restore rehearsal
 
-- [ ] Restore a backup into an isolated environment, using a separate endpoint and database from production.
+- [ ] Restore a backup into an isolated environment, using a separate endpoint and database from production. With Engram's export, create an empty database and, with `ENGRAM_DATABASE_URL` pointing at it, run `engram cloud backup import --input <archive> --dry-run`, then `--apply`. Import refuses a database that already has Cloud data, so do this before `engram cloud bootstrap admin`.
+- [ ] Re-issue managed tokens for the rehearsal: backups never carry tokens. If the restored data has exactly one enabled managed admin, `engram cloud bootstrap recover-token` issues its first token. Legacy username/password users cannot log in after a restore.
 - [ ] Start the restored Cloud runtime with its own protected configuration; do not reuse production credentials merely to perform the rehearsal.
 - [ ] Verify the restored endpoint responds at `GET /health` and that an authorized test client can complete `engram sync --cloud --project <project>`.
 - [ ] Confirm observable success: `engram sync --cloud --status --project <project>` reports the expected restored remote chunks and a pending-import state you understand, and the expected replicated data is visible in the isolated dashboard. Record the result and any gaps before relying on the backup process.
@@ -47,6 +49,6 @@ Use this checklist before operating a self-hosted Engram Cloud endpoint for user
 
 | Engram runtime | Operator and platform |
 |---|---|
-| Cloud sync API, dashboard, authenticated-mode configuration requirements, and the documented health endpoint | TLS termination, reverse proxy, ingress/firewall rules, secret storage and rotation, durable storage, backups, restore rehearsal, and deployment version selection |
+| Cloud sync API, dashboard, authenticated-mode configuration requirements, the documented health endpoint, and the `engram cloud backup` export/import commands | TLS termination, reverse proxy, ingress/firewall rules, secret storage and rotation, durable storage, backup scheduling, storage, retention and off-host copies, restore rehearsal, and deployment version selection |
 
-This checklist does not configure infrastructure, select a provider, implement high availability, supply backup or monitoring products, define recovery objectives, or change PostgreSQL configuration. Use the [Quickstart](./quickstart.md) for the supported setup and runtime variables, and the [Technical Cloud Reference](../../DOCS.md#cloud-cli-opt-in) for the full command and endpoint contract.
+This checklist does not configure infrastructure, select a provider, implement high availability, schedule, store, or expire backups, supply monitoring products, define recovery objectives, or change PostgreSQL configuration. Use the [Quickstart](./quickstart.md) for the supported setup and runtime variables, and the [Technical Cloud Reference](../../DOCS.md#cloud-cli-opt-in) for the full command and endpoint contract.

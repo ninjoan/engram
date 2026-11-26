@@ -227,7 +227,7 @@ engram version                Show version
 
 For `setup [agent]`, see [Agent Setup](docs/AGENT-SETUP.md) for supported integrations rather than treating a fixed agent list as exhaustive. `--all` deliberately selects every project for applicable reads and local sync export (cloud sync still requires a single project); do not combine it with an explicit project. `engram context [project]` accepts the positional project as an alternative to `--project`. `projects prune --paths-only` limits candidates to names containing `/` or `\`.
 
-Cloud commands include `cloud status`, `cloud config --server <url>`, `cloud enroll <project>`, `cloud unenroll <project>`, and `cloud serve`. For upgrades, use `cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>`; `remirror` rebuilds cloud state from authoritative local data. Server-side repair uses `cloud repair materialize-mutations --project <project> (--dry-run|--apply)`. Managed-admin setup uses `cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]`; stranded-admin token recovery uses `cloud bootstrap recover-token [--name <name>] [--revoke-existing]`. See [Cloud CLI](#cloud-cli-opt-in) and [managed-user bootstrap](#managed-users-tokens-and-cli-bootstrap) for constraints and detailed syntax.
+Cloud commands include `cloud status`, `cloud config --server <url>`, `cloud enroll <project>`, `cloud unenroll <project>`, and `cloud serve`. For upgrades, use `cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>`; `remirror` rebuilds cloud state from authoritative local data. Server-side repair uses `cloud repair materialize-mutations --project <project> (--dry-run|--apply)`. Managed-admin setup uses `cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]`; stranded-admin token recovery uses `cloud bootstrap recover-token [--name <name>] [--revoke-existing]`. Operator backups use `cloud backup export --output <path|-> [--force]` and `cloud backup import --input <path|-> (--dry-run|--apply)` (see [Cloud Backup and Restore](#cloud-backup-and-restore)). See [Cloud CLI](#cloud-cli-opt-in) and [managed-user bootstrap](#managed-users-tokens-and-cli-bootstrap) for constraints and detailed syntax.
 
 ---
 
@@ -1055,6 +1055,8 @@ Potentially recoverable retry-cap relations are excluded from both age pruning a
 - `engram cloud repair materialize-mutations --project <project> (--dry-run|--apply)` — explicit server-side Postgres repair that backfills existing `cloud_mutations` into compatible `cloud_chunks` without deleting remote data
 - `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` — create the first managed admin (see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap))
 - `engram cloud bootstrap recover-token [--name <name>] [--revoke-existing]` — recover the stranded managed admin token state described below
+- `engram cloud backup export --output <path|-> [--force]` — write a logical backup archive of the Cloud database at `ENGRAM_DATABASE_URL` (see [Cloud Backup and Restore](#cloud-backup-and-restore))
+- `engram cloud backup import --input <path|-> (--dry-run|--apply)` — restore a backup archive into an empty Cloud database at `ENGRAM_DATABASE_URL`
 
 Cloud enrollment, unenrollment, and explicit cloud sync project inputs decode one
 layer of URL path encoding by default (for example, `my%20project` selects
@@ -1223,6 +1225,32 @@ ENGRAM_DATABASE_URL='postgres://...' engram cloud repair materialize-mutations -
 The backfill is project-scoped, non-destructive, and idempotent: it inserts missing compatible chunks and leaves existing `cloud_mutations` and chunks in place.
 
 `engram cloud serve` also runs this materialization repair automatically for every configured `ENGRAM_CLOUD_ALLOWED_PROJECTS` entry at startup. The command reports PostgreSQL initialization, session indexing, and per-project repair progress on stderr. Once the listener is bound, HTTP routes return `503 Service Unavailable` until startup finishes and Cloud routes become available. Use [the Cloud health endpoint](#health) to check readiness. The explicit repair command remains available for operator verification, dry-runs, and re-running a project after an upgrade.
+
+### Cloud Backup and Restore
+
+`engram cloud backup` is an operator command that runs against the Postgres database in `ENGRAM_DATABASE_URL`, like `cloud repair`. It has no HTTP or dashboard route: archives are not signed, so only an operator with database access may restore one.
+
+```bash
+ENGRAM_DATABASE_URL='postgres://...' engram cloud backup export --output engram-cloud.tar.gz
+ENGRAM_DATABASE_URL='postgres://<fresh-db>' engram cloud backup import --input engram-cloud.tar.gz --dry-run
+ENGRAM_DATABASE_URL='postgres://<fresh-db>' engram cloud backup import --input engram-cloud.tar.gz --apply
+```
+
+- `export --output <path>` reads every backup table from one consistent snapshot and writes a gzip-compressed tar archive with file mode `0600`. It writes a temp file in the same directory and renames it into place only after a complete write, so a failed or interrupted export (Ctrl-C) leaves no partial archive. An existing file is refused unless `--force` is given; `--force` never replaces a directory or other non-regular file. `--output -` writes the archive to stdout and the summary to stderr; the permissions of a redirected file are then up to your shell and umask.
+- `import --input <path>` requires exactly one of `--dry-run` or `--apply`. The archive's format, member list, sizes, and checksums are verified before the database is touched, and the whole restore runs in one transaction. `--dry-run` validates every row and rolls back. `--input -` reads the archive from stdin.
+- Import only restores into an empty Cloud database: if any backup table or `cloud_principal_tokens` has rows, it exits non-zero with `target database is not empty` and changes nothing. Run it on a fresh database **before** `engram cloud bootstrap admin` and before any client syncs to it.
+- Both commands print a summary: archive path and bytes (export), creation time, format version, highest mutation sequence, and per-table row counts. Usage errors, a missing `ENGRAM_DATABASE_URL`, an existing output, an invalid archive, or a non-empty target exit with status `1`.
+- After a restore, every serial sequence, including the `cloud_mutations` sequence, continues past the source's values, so a client whose sync cursor is at or below the backup's highest mutation sequence pulls every new write. The server does not detect a client whose cursor is ahead of the restored backup (writes made after the export), and such a client can miss writes made after the restore.
+
+**Archive contents.** The archive holds the project memory data (`cloud_chunks`, `cloud_mutations`, `cloud_project_sessions`) and Cloud state: users and principals, project grants, project controls and pauses, auth and sync audit logs, session authority, prompt claims, and prompt source attestations. It never contains `cloud_principal_tokens` (token hashes), `cloud_users.password_hash`, legacy pre-migration columns, or the `receipt_audit` startup receipt history, and it never contains `ENGRAM_CLOUD_TOKEN_PEPPER`, `ENGRAM_JWT_SECRET`, or other environment secrets. The exclusion list is recorded in the archive's `backup.json` manifest.
+
+**After `--apply`:**
+
+- Managed tokens are not restored. Re-issue a token for every managed principal and have each client re-run its token setup. When the restored deployment has exactly one enabled managed admin, `engram cloud bootstrap recover-token` issues that admin's first token (requires `ENGRAM_CLOUD_TOKEN_PEPPER`); that admin can then issue the other tokens.
+- Legacy `cloud_users` rows are restored without password hashes and cannot log in.
+- Run `engram cloud bootstrap admin` only if the backup held no managed admin.
+
+**Protect the archive.** It contains plaintext memories, prompts, and audit history. Keep it at mode `0600`, restrict who can read it, and encrypt it before copying it off the host. Engram does not encrypt, upload, schedule, or expire backup archives; storage, retention, off-host copies, and restore rehearsal remain the operator's responsibility (see the [production checklist](docs/engram-cloud/production-checklist.md)).
 
 ### Local Cloud Bring-Up (Docker + Postgres)
 
