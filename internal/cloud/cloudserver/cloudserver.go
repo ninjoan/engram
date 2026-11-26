@@ -91,6 +91,15 @@ type CloudServer struct {
 	// backupExport overrides the export itself and is a test seam only.
 	backupSource BackupSource
 	backupExport func(ctx context.Context, w io.Writer) error
+	// backupSettings, backupKey and backupRunner back the Backups page
+	// settings routes (dashboard_backup_settings.go). backupCheckAccess
+	// overrides the destination access check and backupNow the clock used
+	// for the next scheduled run; both are test seams only.
+	backupSettings    BackupSettingsStore
+	backupKey         BackupKey
+	backupRunner      BackupRunner
+	backupCheckAccess func(ctx context.Context, creds cloudstore.BackupDestinationCredentials) error
+	backupNow         func() time.Time
 	// version is the optional running build identifier surfaced in the
 	// dashboard chrome (Layout footer + LoginPage). An empty identifier is
 	// displayed as "version unknown" on both surfaces.
@@ -359,10 +368,22 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("POST /dashboard/admin/tokens/{tokenID}/revoke", s.requireDashboardSession(s.handleDashboardRevokeManagedToken))
 	s.mux.HandleFunc("POST /dashboard/admin/users/{principalID}/grants", s.requireDashboardSession(s.handleDashboardCreateManagedGrant))
 	s.mux.HandleFunc("POST /dashboard/admin/users/{principalID}/grants/{project}/revoke", s.requireDashboardSession(s.handleDashboardRevokeManagedGrant))
-	// On-demand backup download (dashboard_backup.go): managed admin only,
-	// audited before streaming. No import/restore route exists by design.
-	s.mux.HandleFunc("POST /dashboard/admin/backups/download", s.requireDashboardSession(s.handleDashboardBackupDownload))
-	s.mux.HandleFunc("GET /dashboard/admin/backups/download", s.requireDashboardSession(s.handleDashboardBackupDownloadMethodNotAllowed))
+	// Backups page, on-demand download (dashboard_backup.go) and backup
+	// settings (dashboard_backup_settings.go). Every mutation is POST only,
+	// managed admin only, same-origin checked and audited; GET on a mutation
+	// path answers 405. No import/restore route exists by design.
+	s.mux.HandleFunc("GET /dashboard/admin/backups", s.requireDashboardSession(s.handleDashboardBackupsPage))
+	for path, handler := range map[string]http.HandlerFunc{
+		"/dashboard/admin/backups/download":           s.handleDashboardBackupDownload,
+		"/dashboard/admin/backups/destination":        s.handleDashboardSaveBackupDestination,
+		"/dashboard/admin/backups/destination/test":   s.handleDashboardTestBackupDestination,
+		"/dashboard/admin/backups/destination/remove": s.handleDashboardRemoveBackupDestination,
+		"/dashboard/admin/backups/schedule":           s.handleDashboardSaveBackupSchedule,
+		"/dashboard/admin/backups/run":                s.handleDashboardBackupNow,
+	} {
+		s.mux.HandleFunc("POST "+path, s.requireDashboardSession(requireSameOriginDashboardMutation(handler)))
+		s.mux.HandleFunc("GET "+path, s.requireDashboardSession(s.handleDashboardBackupMethodNotAllowed))
+	}
 	s.mux.HandleFunc("GET /sync/pull", s.withAuth(s.handlePullManifest))
 	s.mux.HandleFunc("GET /sync/pull/{chunkID}", s.withAuth(s.handlePullChunk))
 	s.mux.HandleFunc("POST /sync/push", s.withAuth(s.handlePushChunk))

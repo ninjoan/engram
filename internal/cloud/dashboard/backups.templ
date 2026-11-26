@@ -1,0 +1,238 @@
+package dashboard
+
+// AdminBackupsPage renders the admin Backups surface: the on-demand download,
+// the external destination and weekday/time schedule, "Back up now", the run
+// history, and what a backup archive contains and excludes.
+//
+// Every route behind its forms is owned by internal/cloud/cloudserver, which
+// enforces the managed-admin policy, the same-origin check and the audit
+// trail; this page only renders forms for sessions that hold that capability.
+// Controls appear only when they map to a real action: the settings forms
+// need ENGRAM_CLOUD_BACKUP_KEY, the schedule needs a destination, and
+// "Back up now" needs a backup runner. A stored credential is never rendered;
+// only the masked access key id hint is. There is deliberately no restore
+// control: archives are unsigned, so restore stays an operator-only CLI
+// (engram cloud backup import).
+templ AdminBackupsPage(v BackupsPageView) {
+	<section class="frame-section">
+		<div class="section-header">
+			<div>
+				<p class="section-kicker">ADMIN SURFACE</p>
+				<h2>Backups</h2>
+			</div>
+		</div>
+		@adminNav("backups")
+		if v.Notice.Kind != "" {
+			<div class={ backupNoticeClass(v.Notice.Kind) } role="status">
+				<p>{ v.Notice.Message }</p>
+			</div>
+		}
+		<div class="data-frame">
+			<p class="section-kicker">DOWNLOAD BACKUP</p>
+			<p>One gzip-compressed tar archive of every project's memories and the Cloud state, read from a single consistent database snapshot. Its <code>backup.json</code> manifest, written last, records each table's row count and SHA-256 checksum.</p>
+			if v.CanManage {
+				<form method="post" action="/dashboard/admin/backups/download" class="managed-user-form">
+					<button type="submit">Download backup</button>
+				</form>
+				<p class="muted">Every download is recorded in the audit log as <code>backup.download</code> before the archive is sent.</p>
+			}
+		</div>
+		if !v.CanManage {
+			@BackupDownloadAdministrationNotice()
+		}
+		<div class="data-frame policy-note danger-note">
+			<p><strong>The archive holds plaintext memories.</strong> Observations, prompts, and audit history are stored unencrypted. Treat it like a database dump: restrict who can read it and encrypt it before copying it off this machine.</p>
+		</div>
+		<h3 class="section-block-title">Scheduled backups</h3>
+		@backupScheduledSection(v)
+		<h3 class="section-block-title">Included</h3>
+		<table class="data-table">
+			<tbody>
+				for _, table := range v.Tables {
+					<tr><td><code>{ table }</code></td></tr>
+				}
+			</tbody>
+		</table>
+		<h3 class="section-block-title">Never included</h3>
+		<table class="data-table">
+			<thead>
+				<tr>
+					<th>Table</th>
+					<th>Column</th>
+					<th>Reason</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, exclusion := range v.Exclusions {
+					<tr>
+						<td><code>{ exclusion.Table }</code></td>
+						<td>{ emptyDash(exclusion.Column) }</td>
+						<td>{ exclusion.Reason }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+		<p class="muted">Environment secrets such as <code>ENGRAM_CLOUD_TOKEN_PEPPER</code>, <code>ENGRAM_JWT_SECRET</code> and <code>ENGRAM_CLOUD_BACKUP_KEY</code> are never part of a backup. After a restore every managed token must be re-issued and the backup destination and schedule configured again.</p>
+		<h3 class="section-block-title">Restore</h3>
+		<p class="muted">Restoring is operator-only: run <code>engram cloud backup import</code> against a fresh database. The dashboard never restores archives because they are not signed.</p>
+	</section>
+}
+
+// backupScheduledSection renders the destination, schedule, "Back up now"
+// and run history according to the settings state.
+templ backupScheduledSection(v BackupsPageView) {
+	<p class="muted">Engram uploads the same archive to an S3-compatible bucket (Cloudflare R2, MinIO, AWS S3) on the weekdays and time you choose. Engram never deletes uploaded backups: configure expiration with the bucket's lifecycle rules.</p>
+	switch v.Settings {
+		case BackupSettingsNotWired:
+			@EmptyState("Not Available", "This server has no backup settings store. Download a backup above or run engram cloud backup export on the server.")
+		case BackupSettingsUnavailable:
+			<div class="data-frame policy-note danger-note">
+				<p><strong>Backup settings are temporarily unavailable.</strong> The destination, schedule and run history could not be read. Try again shortly.</p>
+			</div>
+		default:
+			if v.Settings == BackupSettingsKeyMissing {
+				<div class="data-frame policy-note">
+					<p><strong>Set <code>ENGRAM_CLOUD_BACKUP_KEY</code> to configure scheduled backups.</strong> Destination credentials are stored encrypted with this dedicated key (32 bytes as hex or base64, for example from <code>openssl rand -hex 32</code>) and restart <code>engram cloud serve</code>. Keep the key outside the database and its backups.</p>
+				</div>
+			} else if !v.CanManage {
+				@BackupSettingsAdministrationNotice()
+			}
+			@backupDestinationBlock(v)
+			@backupScheduleBlock(v)
+			@backupRunHistory(v)
+	}
+}
+
+templ backupDestinationBlock(v BackupsPageView) {
+	<div class="data-frame">
+		<p class="section-kicker">DESTINATION</p>
+		if v.Destination.Configured {
+			<table>
+				<tbody>
+					<tr><th>Endpoint</th><td><code>{ v.Destination.Endpoint }</code></td></tr>
+					<tr><th>Region</th><td>{ v.Destination.Region }</td></tr>
+					<tr><th>Bucket</th><td><code>{ v.Destination.Bucket }</code></td></tr>
+					<tr><th>Prefix</th><td>{ emptyDash(v.Destination.Prefix) }</td></tr>
+					<tr><th>Access key id</th><td><code>{ v.Destination.AccessKeyIDHint }</code></td></tr>
+					<tr><th>Updated</th><td>{ formatTimeValue(v.Destination.UpdatedAt) }</td></tr>
+				</tbody>
+			</table>
+		} else {
+			<p class="muted">No destination is configured.</p>
+		}
+		if v.settingsFormsVisible() {
+			<form method="post" action="/dashboard/admin/backups/destination" class="backup-settings-form" autocomplete="off">
+				<label>Endpoint <input type="text" name="endpoint" value={ v.Destination.Endpoint } placeholder="https://<account>.r2.cloudflarestorage.com" required/></label>
+				<label>Region <input type="text" name="region" value={ backupDestinationRegionValue(v.Destination) } placeholder="auto" required/></label>
+				<label>Bucket <input type="text" name="bucket" value={ v.Destination.Bucket } placeholder="engram-backups" required/></label>
+				<label>Prefix <input type="text" name="prefix" value={ v.Destination.Prefix } placeholder="engram/prod/"/></label>
+				<label>Access key id <input type="text" name="access_key_id" value="" autocomplete="off" required/></label>
+				<label>Secret access key <input type="password" name="secret_access_key" value="" autocomplete="new-password" required/></label>
+				<p class="muted">Both credentials are required on every save: they are encrypted together with the endpoint, region, bucket and prefix they authorize, and are never shown again.</p>
+				<button type="submit">Save destination</button>
+			</form>
+			if v.Destination.Configured {
+				<div class="managed-user-form backup-actions">
+					<form method="post" action="/dashboard/admin/backups/destination/test" class="switch-form">
+						<button type="submit">Test connection</button>
+					</form>
+					<form method="post" action="/dashboard/admin/backups/destination/remove" class="switch-form">
+						<button type="submit" class="secondary">Remove destination</button>
+					</form>
+				</div>
+			}
+		}
+	</div>
+}
+
+templ backupScheduleBlock(v BackupsPageView) {
+	<div class="data-frame">
+		<p class="section-kicker">SCHEDULE</p>
+		<p>
+			@StatusBadge(v.scheduleStatusLabel(), v.scheduleStatusVariant())
+			if v.Schedule.Configured {
+				<span class="muted">{ backupWeekdaysLabel(v.Schedule.Weekdays) } at { v.Schedule.TimeOfDay } { v.Schedule.Timezone }</span>
+			}
+		</p>
+		<p>Next run: <strong>{ formatBackupNextRun(v.NextRun, v.Schedule.Timezone) }</strong></p>
+		if v.scheduleFormVisible() {
+			<form method="post" action="/dashboard/admin/backups/schedule" class="backup-settings-form">
+				<fieldset class="weekday-picker">
+					<legend>Weekdays</legend>
+					for _, day := range backupWeekdayOptions(v.Schedule.Weekdays) {
+						<label><input type="checkbox" name="weekday" value={ day.Value } checked?={ day.Checked }/> { day.Label }</label>
+					}
+				</fieldset>
+				<label>Time (24h) <input type="time" name="time" value={ v.Schedule.TimeOfDay } required/></label>
+				<label>Time zone <input type="text" name="timezone" value={ v.Schedule.Timezone } placeholder="UTC" required/></label>
+				<p class="muted">An IANA time zone such as <code>UTC</code>, <code>America/Lima</code> or <code>Europe/Madrid</code>.</p>
+				<label><input type="checkbox" name="enabled" value="on" checked?={ v.Schedule.Enabled }/> Enabled</label>
+				<button type="submit">Save schedule</button>
+			</form>
+		} else if v.settingsFormsVisible() {
+			<p class="muted">Configure a destination above before scheduling backups.</p>
+		}
+		if v.CanRunNow {
+			<form method="post" action="/dashboard/admin/backups/run" class="managed-user-form">
+				<button type="submit">Back up now</button>
+			</form>
+			<p class="muted">Starts one upload to the destination now; it is recorded as <code>backup.run.manual</code> and appears in the history below.</p>
+		}
+	</div>
+}
+
+templ backupRunHistory(v BackupsPageView) {
+	<div class="data-frame">
+		<p class="section-kicker">RECENT RUNS</p>
+		if len(v.Runs) == 0 {
+			<p class="muted">No backup has been uploaded yet.</p>
+		} else {
+			<table class="data-table">
+				<thead>
+					<tr>
+						<th>Trigger</th>
+						<th>Scheduled for</th>
+						<th>Started</th>
+						<th>Finished</th>
+						<th>Status</th>
+						<th>Size</th>
+						<th>Object key</th>
+						<th>Error</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, run := range v.Runs {
+						<tr>
+							<td>{ run.Trigger }</td>
+							<td>{ formatBackupScheduledFor(run.ScheduledFor) }</td>
+							<td>{ formatTimeValue(run.StartedAt) }</td>
+							<td>{ formatTimeValue(run.FinishedAt) }</td>
+							<td>
+								@StatusBadge(run.Status, backupRunStatusVariant(run.Status))
+							</td>
+							<td>{ backupRunSizeLabel(run) }</td>
+							<td><code>{ emptyDash(run.ObjectKey) }</code></td>
+							<td>{ emptyDash(run.ErrorMessage) }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	</div>
+}
+
+// BackupDownloadAdministrationNotice explains why a dashboard admin session
+// without a managed admin token cannot download a backup.
+templ BackupDownloadAdministrationNotice() {
+	<div class="data-frame policy-note">
+		<p><strong>Backup download requires a managed admin token.</strong> Sign in with a token issued by <code>engram cloud bootstrap admin --issue-token ...</code>, or run <code>engram cloud backup export</code> on the server.</p>
+	</div>
+}
+
+// BackupSettingsAdministrationNotice explains why a dashboard admin session
+// without a managed admin token sees the backup settings read-only.
+templ BackupSettingsAdministrationNotice() {
+	<div class="data-frame policy-note">
+		<p><strong>Changing scheduled backups requires a managed admin token.</strong> The destination, schedule and history below are read-only for this session.</p>
+	</div>
+}

@@ -135,10 +135,11 @@ func (s *CloudServer) recordBackupDownloadCompletion(ctx context.Context, store 
 	}
 }
 
-// handleDashboardBackupDownloadMethodNotAllowed answers GET on the download
-// path. Without it, the dashboard's "GET /dashboard/" catch-all would render
-// the home page with 200 for a download link that never exports.
-func (s *CloudServer) handleDashboardBackupDownloadMethodNotAllowed(w http.ResponseWriter, _ *http.Request) {
+// handleDashboardBackupMethodNotAllowed answers GET on every backup mutation
+// path (download, destination, schedule, run). Without it, the dashboard's
+// "GET /dashboard/" catch-all would render the home page with 200 for a link
+// that never runs the action.
+func (s *CloudServer) handleDashboardBackupMethodNotAllowed(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Allow", http.MethodPost)
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }

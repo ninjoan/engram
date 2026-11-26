@@ -1640,3 +1640,56 @@ td:not(:first-child) p,
 .type-pill {
 	font-size: 0.74rem;
 }
+
+/* ─── Admin backups ───────────────────────────────────────────────────────── */
+
+.success-note {
+	border-left: 2px solid var(--engram-success);
+}
+
+.backup-settings-form {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+	gap: 0.65rem 1rem;
+	align-items: end;
+	margin-top: 1rem;
+}
+
+.backup-settings-form label input {
+	margin: 0.25rem 0 0;
+}
+
+.backup-settings-form > p,
+.backup-settings-form > button,
+.backup-settings-form .weekday-picker {
+	grid-column: 1 / -1;
+	margin: 0;
+}
+
+.backup-settings-form > button {
+	width: auto;
+	justify-self: start;
+}
+
+.weekday-picker {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.4rem 1rem;
+	border: 0;
+	padding: 0;
+}
+
+.weekday-picker legend {
+	font-size: 0.82rem;
+	color: var(--engram-text);
+}
+
+.weekday-picker label {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35rem;
+}
+
+.backup-actions {
+	margin-top: 0.85rem;
+}

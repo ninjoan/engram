@@ -33,6 +33,10 @@ const (
 
 	authAuditActionBackupDownload         = "backup.download"
 	authAuditActionBackupDownloadComplete = "backup.download.complete"
+	// backup.destination.update/clear and backup.schedule.update are
+	// recorded by cloudstore in the same transaction as the change.
+	authAuditActionBackupDestinationTest = "backup.destination.test"
+	authAuditActionBackupRunManual       = "backup.run.manual"
 )
 
 // AdminIdentityStore is the storage boundary used by cloudserver admin API

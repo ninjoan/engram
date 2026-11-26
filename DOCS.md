@@ -340,8 +340,14 @@ Dashboard route tree (`engram cloud serve`):
   - `POST /dashboard/admin/users/{principalID}/grants` — create project grant
   - `POST /dashboard/admin/users/{principalID}/grants/{project}/revoke` — revoke project grant
   - Managed-user detail and form routes use the dashboard session, unlike the JSON `/admin/*` API. Viewing detail allows dashboard admin sessions; mutations require managed-admin permission. Successful form mutations redirect (303, or `HX-Redirect` for HTMX), except token creation, which renders the show-once token directly without redirecting.
-  - `GET /dashboard/admin/backups` (admin-gated) — what a backup contains and excludes; the download form renders only for managed-admin sessions
-  - `POST /dashboard/admin/backups/download` — managed admin only (members and legacy admin sessions get 403; `GET` gets 405). Records a `backup.download` auth audit event with outcome `started` first (audit failure returns a generic 500 and sends nothing), then streams the archive as `application/gzip` with `Content-Disposition: attachment; filename="engram-cloud-backup-<yyyymmddThhmmssZ>.tar.gz"` (UTC) and `Cache-Control: no-store`. An export failure before the first byte returns 500; a failure mid-stream aborts the connection, so the browser reports a failed download. Each attempt is closed by a `backup.download.complete` event with outcome `success` or `failure` (with a reason), so the audit log distinguishes finished downloads from failed or cancelled ones. See [Cloud Backup and Restore](#cloud-backup-and-restore).
+  - `GET /dashboard/admin/backups` (admin-gated) — download, scheduled-backup destination and schedule, next run, run history (last 20), and what a backup contains and excludes; forms render only for managed-admin sessions (legacy admin sessions see the settings read-only)
+  - Every backup mutation route below is `POST` only (`GET` gets 405), managed admin only (members and legacy admin sessions get 403), and same-origin checked: a request whose `Sec-Fetch-Site` header is present and not `same-origin`, or whose `Origin` scheme and host differ from the request's own (https when TLS or `X-Forwarded-Proto: https`; host from `Host` or `X-Forwarded-Host`), gets 403 with no side effect and no audit event. Requests without either header are allowed. Successful form posts redirect (303, or `HX-Redirect` for HTMX) to `/dashboard/admin/backups?notice=<code>`.
+  - `POST /dashboard/admin/backups/destination` — save the S3-compatible destination from form fields `endpoint`, `region`, `bucket`, `prefix`, `access_key_id`, `secret_access_key` (both credentials required on every save; only url-encoded body fields are read). Validation errors return 400 with the reason; without `ENGRAM_CLOUD_BACKUP_KEY` returns 409. Audited as `backup.destination.update` in the same transaction.
+  - `POST /dashboard/admin/backups/destination/test` — opens the stored credentials and runs a read-only access check (bounded to 15 s); the result is `ok`, `auth`, `bucket` (not found), `network`, `error` (unexpected response), `key` (credentials cannot be opened with the current key) or `none` (no destination). Audited as `backup.destination.test` (`success`, or `failure` with a reason code).
+  - `POST /dashboard/admin/backups/destination/remove` — remove the destination; audited as `backup.destination.clear`.
+  - `POST /dashboard/admin/backups/schedule` — save the schedule from `weekday` (repeatable: `mon`…`sun`), `time` (`HH:MM`, 24 h), `timezone` (IANA name) and `enabled` (`on`). Invalid values return 400; enabling without a destination returns 409. Audited as `backup.schedule.update` in the same transaction.
+  - `POST /dashboard/admin/backups/run` — start a manual upload ("Back up now"); available only when the server has a backup runner (otherwise 404 and no button). Records `backup.run.manual` with outcome `started` before the run starts, and a `failure` row if the runner refuses.
+  - `POST /dashboard/admin/backups/download` — Records a `backup.download` auth audit event with outcome `started` first (audit failure returns a generic 500 and sends nothing), then streams the archive as `application/gzip` with `Content-Disposition: attachment; filename="engram-cloud-backup-<yyyymmddThhmmssZ>.tar.gz"` (UTC) and `Cache-Control: no-store`. An export failure before the first byte returns 500; a failure mid-stream aborts the connection, so the browser reports a failed download. Each attempt is closed by a `backup.download.complete` event with outcome `success` or `failure` (with a reason), so the audit log distinguishes finished downloads from failed or cancelled ones. See [Cloud Backup and Restore](#cloud-backup-and-restore).
   - `GET /dashboard/admin/health` (admin-gated)
   - `POST /dashboard/admin/projects/{name}/sync` (admin-gated; toggle sync enabled/disabled)
   - `GET /dashboard/admin/projects/{name}/sync/form` (admin-gated; HTMX partial)
@@ -855,6 +861,7 @@ unchanged.
 | `ENGRAM_JWT_SECRET`             | Required in authenticated cloud serve mode. Must be explicitly set to a non-default value.                                                                                                                                                                | (unset)              |
 | `ENGRAM_CLOUD_ADMIN`            | Optional legacy dashboard-admin token in authenticated cloud serve mode. It can access dashboard admin read surfaces, project sync controls, and audit logs, but not managed-user, token, or grant mutations. Ignored/rejected in insecure mode. | (unset) |
 | `ENGRAM_CLOUD_TOKEN_PEPPER`     | Dedicated secret used to hash managed cloud tokens. Required both to issue tokens via `engram cloud bootstrap admin --issue-token` (and the admin API/dashboard) and to enable managed-token authentication on `engram cloud serve`. Distinct from `ENGRAM_JWT_SECRET` on purpose — see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap). | (unset)              |
+| `ENGRAM_CLOUD_BACKUP_KEY`       | Dedicated key (32 bytes as hex or base64, e.g. `openssl rand -hex 32`) that encrypts the scheduled-backup destination credentials at rest. Unset: the dashboard shows the backup settings read-only. Set but invalid: `engram cloud serve` refuses to start. See [Scheduled backups](#scheduled-backups-to-an-s3-compatible-destination). | (unset) |
 
 ### mem_save timing diagnostics
 
@@ -1122,6 +1129,7 @@ Cloud runtime envs for `engram cloud serve`:
 | `ENGRAM_CLOUD_INSECURE_NO_AUTH` | no                       | Set to `1` only for local insecure mode; cannot be combined with `ENGRAM_CLOUD_TOKEN` |
 | `ENGRAM_CLOUD_ADMIN`            | no                       | Optional legacy dashboard-admin token for read surfaces, project sync controls, and audit logs; managed-user mutations require a managed admin token; rejected in insecure mode |
 | `ENGRAM_CLOUD_TOKEN_PEPPER`     | no (required to enable managed-token auth) | Dedicated managed-token hashing secret. Must differ from `ENGRAM_JWT_SECRET`. Required both by `engram cloud bootstrap admin --issue-token` and by `engram cloud serve` to accept managed tokens at runtime (see below). |
+| `ENGRAM_CLOUD_BACKUP_KEY`       | no (required to configure scheduled backups) | Encrypts backup destination credentials (32 bytes, hex or base64). Must differ from the other secrets. An invalid value makes `engram cloud serve` refuse to start. |
 
 ### Managed users, tokens, and CLI bootstrap
 
@@ -1262,7 +1270,20 @@ ENGRAM_DATABASE_URL='postgres://<fresh-db>' engram cloud backup import --input e
 - Legacy `cloud_users` rows are restored without password hashes and cannot log in.
 - Run `engram cloud bootstrap admin` only if the backup held no managed admin.
 
-**Protect the archive.** It contains plaintext memories, prompts, and audit history. Keep it at mode `0600`, restrict who can read it, and encrypt it before copying it off the host. This applies equally to an archive downloaded from the dashboard. Engram does not encrypt, upload, schedule, or expire backup archives; storage, retention, off-host copies, and restore rehearsal remain the operator's responsibility (see the [production checklist](docs/engram-cloud/production-checklist.md)).
+**Protect the archive.** It contains plaintext memories, prompts, and audit history. Keep it at mode `0600`, restrict who can read it, and encrypt it before copying it off the host. This applies equally to an archive downloaded from the dashboard. Engram does not encrypt or expire backup archives; retention and restore rehearsal remain the operator's responsibility (see the [production checklist](docs/engram-cloud/production-checklist.md)).
+
+The archive also never contains the scheduled-backup settings: `cloud_backup_destinations` (credentials sealed with `ENGRAM_CLOUD_BACKUP_KEY`), `cloud_backup_schedule` and `cloud_backup_runs` (run history) are operational state of the server that took the backup. Configure the destination and schedule again after a restore. Like `cloud_principal_tokens`, any row in these tables makes the import target count as not empty.
+
+#### Scheduled backups to an S3-compatible destination
+
+A managed admin configures off-host backups on **Admin → Backups**:
+
+1. Set `ENGRAM_CLOUD_BACKUP_KEY` on the server to 32 random bytes as hex or base64 (`openssl rand -hex 32`) and restart `engram cloud serve`. The key encrypts the destination credentials at rest (AES-256-GCM, bound to the endpoint, region, bucket and prefix they authorize); keep it outside the database and its backups. Without it the page explains what is missing and shows no forms; an invalid value makes `engram cloud serve` refuse to start.
+2. **Destination**: endpoint (an `https` origin such as `https://<account>.r2.cloudflarestorage.com`; plain `http` only for loopback, e.g. local MinIO), region (`auto` for Cloudflare R2), bucket, optional key prefix, access key id and secret access key. Both credentials are required on every save and are never shown again; the page shows only the last four characters of the access key id. **Test connection** checks the stored credentials against the bucket.
+3. **Schedule**: weekdays, a 24-hour time and an IANA time zone (for example Monday–Friday 03:00 `America/Lima`). The page shows the next run in that zone and in UTC. A time skipped by a daylight-saving change runs once at the moment the clocks jump; a repeated time runs once. The schedule can be enabled only while a destination exists; removing the destination pauses it.
+4. **Recent runs** lists the last 20 uploads (trigger, scheduled time, start, finish, status, size, object key, error).
+
+Engram never deletes uploaded backups. Configure expiration with the bucket's lifecycle rules (for example an R2 object lifecycle rule on the prefix).
 
 ### Local Cloud Bring-Up (Docker + Postgres)
 
