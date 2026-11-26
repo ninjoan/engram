@@ -341,7 +341,7 @@ func cmdCloudBackupImport(argv []string) {
 	}
 	fmt.Println("Next steps:")
 	fmt.Println("  - Managed tokens are never part of a backup: re-issue a token for every managed principal and have each client re-run its token setup.")
-	fmt.Println("    With exactly one enabled managed admin, `engram cloud bootstrap recover-token` issues that admin's first token (requires ENGRAM_CLOUD_TOKEN_PEPPER).")
+	fmt.Println("    `engram cloud bootstrap recover-token --principal <id|username>` issues the first token for one enabled managed admin (requires ENGRAM_CLOUD_TOKEN_PEPPER); with exactly one enabled managed admin, --principal may be omitted.")
 	fmt.Println("  - Legacy cloud_users were restored without password hashes and cannot log in.")
 	fmt.Println("  - Restored managed admins replace admin bootstrap: run `engram cloud bootstrap admin` only if the backup held no managed admin.")
 }

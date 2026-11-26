@@ -34,7 +34,7 @@ Use this checklist before operating a self-hosted Engram Cloud endpoint for user
 ### Restore rehearsal
 
 - [ ] Restore a backup into an isolated environment, using a separate endpoint and database from production. With Engram's export, create an empty database and, with `ENGRAM_DATABASE_URL` pointing at it, run `engram cloud backup import --input <archive> --dry-run`, then `--apply`. Import refuses a database that already has Cloud data, so do this before `engram cloud bootstrap admin`.
-- [ ] Re-issue managed tokens for the rehearsal: backups never carry tokens. If the restored data has exactly one enabled managed admin, `engram cloud bootstrap recover-token` issues its first token. Legacy username/password users cannot log in after a restore.
+- [ ] Re-issue managed tokens for the rehearsal: backups never carry tokens. Run `engram cloud bootstrap recover-token --principal <id|username>` once to issue the first token for one enabled managed admin (`--principal` may be omitted when the restored data has exactly one enabled managed admin), then have that admin issue the other tokens. Legacy username/password users cannot log in after a restore.
 - [ ] Start the restored Cloud runtime with its own protected configuration; do not reuse production credentials merely to perform the rehearsal.
 - [ ] Verify the restored endpoint responds at `GET /health` and that an authorized test client can complete `engram sync --cloud --project <project>`.
 - [ ] Confirm observable success: `engram sync --cloud --status --project <project>` reports the expected restored remote chunks and a pending-import state you understand, and the expected replicated data is visible in the isolated dashboard. Record the result and any gaps before relying on the backup process.

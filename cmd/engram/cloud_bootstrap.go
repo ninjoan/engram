@@ -66,6 +66,7 @@ type cloudBootstrapAdminArgs struct {
 }
 
 type cloudBootstrapRecoverTokenArgs struct {
+	principal      string
 	name           string
 	revokeExisting bool
 }
@@ -93,9 +94,10 @@ func cmdCloudBootstrap() {
 
 func printCloudBootstrapUsage() {
 	fmt.Println("usage: engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]")
-	fmt.Println("       engram cloud bootstrap recover-token [--name <name>] [--revoke-existing]")
+	fmt.Println("       engram cloud bootstrap recover-token [--principal <id|username>] [--name <name>] [--revoke-existing]")
 	fmt.Println("admin creates the first managed admin for a self-hosted cloud deployment")
 	fmt.Println("recover-token issues one token for the eligible stranded managed admin")
+	fmt.Println("--principal selects one enabled managed admin by principal id or exact username when several exist (for example after a backup restore)")
 	fmt.Println("--revoke-existing replaces exactly one unused active bootstrap token")
 }
 
@@ -267,6 +269,8 @@ func cmdCloudBootstrapAdmin() {
 
 // cmdCloudBootstrapRecoverToken repairs only the partial bootstrap state where
 // the sole enabled managed human admin has no token anywhere in the deployment.
+// --principal targets one explicitly selected enabled managed human admin
+// instead, so several admins may exist (the state after a backup restore).
 // --revoke-existing explicitly permits replacement of exactly one unused active
 // bootstrap token. Eligibility and token-plus-audit atomicity are enforced by
 // cloudstore; this command only generates and hashes the one-time credential
@@ -314,7 +318,17 @@ func cmdCloudBootstrapRecoverToken() {
 	if name == "" {
 		name = "cli-bootstrap-recovery"
 	}
+	reasonCode := "stranded_admin_token_recovered"
+	metadata := map[string]any{
+		"recovered":    true,
+		"token_prefix": managedToken.Prefix,
+	}
+	if args.principal != "" {
+		reasonCode = "selected_admin_token_recovered"
+		metadata["principal_selector"] = args.principal
+	}
 	_, err = cs.RecoverStrandedAdminTokenWithAudit(context.Background(), cloudstore.RecoverStrandedAdminTokenParams{
+		Principal:      args.principal,
 		TokenPrefix:    managedToken.Prefix,
 		TokenHash:      tokenHash,
 		Name:           name,
@@ -323,11 +337,8 @@ func cmdCloudBootstrapRecoverToken() {
 		ActorSource: string(cloudauth.PrincipalSourceBootstrapCLI),
 		Action:      cloudBootstrapAuditAction,
 		Outcome:     cloudBootstrapAuditOutcomeSuccess,
-		ReasonCode:  "stranded_admin_token_recovered",
-		Metadata: map[string]any{
-			"recovered":    true,
-			"token_prefix": managedToken.Prefix,
-		},
+		ReasonCode:  reasonCode,
+		Metadata:    metadata,
 	})
 	if err != nil {
 		fatal(fmt.Errorf("cloud bootstrap recover-token: %w", err))
@@ -431,6 +442,15 @@ func parseCloudBootstrapRecoverTokenArgs(args []string) (cloudBootstrapRecoverTo
 			out.name = strings.TrimSpace(args[i])
 			if out.name == "" {
 				return out, fmt.Errorf("--name requires a non-empty value")
+			}
+		case "--principal":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return out, fmt.Errorf("--principal requires a value")
+			}
+			i++
+			out.principal = strings.TrimSpace(args[i])
+			if out.principal == "" {
+				return out, fmt.Errorf("--principal requires a non-empty value")
 			}
 		case "--revoke-existing":
 			out.revokeExisting = true

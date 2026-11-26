@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ const (
 	strandedAdminRecoveryAuditAction      = "bootstrap.cli"
 	strandedAdminRecoveryAuditOutcome     = "success"
 	strandedAdminRecoveryAuditReason      = "stranded_admin_token_recovered"
+	selectedAdminRecoveryAuditReason      = "selected_admin_token_recovered"
 )
 
 var (
@@ -103,7 +105,11 @@ type CreatePrincipalTokenParams struct {
 
 // RecoverStrandedAdminTokenParams contains the non-secret token data needed to
 // recover the single admin left without a token by a failed bootstrap.
+// Principal optionally selects the target admin by principal id or exact
+// username, so a deployment with several enabled managed admins and no token
+// (for example after a backup restore) can recover one of them.
 type RecoverStrandedAdminTokenParams struct {
+	Principal      string
 	TokenPrefix    string
 	TokenHash      string
 	Name           string
@@ -508,6 +514,11 @@ func (cs *CloudStore) CreatePrincipalTokenWithAudit(ctx context.Context, params 
 // than normal token issuance: it repairs only the partial state left by the
 // historical bootstrap audit failure and preserves all grants. Explicit
 // replacement remains available only while exactly one active token is unused.
+//
+// When params.Principal is set, the target is that enabled managed human admin
+// instead of the sole one, so any number of enabled admins is allowed; every
+// token-state rule above still applies unchanged, and the audit records the
+// distinct selected-admin reason.
 func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, params RecoverStrandedAdminTokenParams, audit AuthAuditEvent) (PrincipalToken, error) {
 	if cs == nil || cs.db == nil {
 		return PrincipalToken{}, fmt.Errorf("cloudstore: not initialized")
@@ -544,11 +555,24 @@ func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, pa
 	if err != nil {
 		return PrincipalToken{}, err
 	}
-	if len(adminIDs) != 1 {
-		return PrincipalToken{}, fmt.Errorf("%w: requires exactly one enabled managed human admin, found %d", ErrStrandedAdminRecoveryIneligible, len(adminIDs))
+	selector := strings.TrimSpace(params.Principal)
+	var principalID string
+	auditReason := strandedAdminRecoveryAuditReason
+	targetLabel := "sole"
+	if selector == "" {
+		if len(adminIDs) != 1 {
+			return PrincipalToken{}, fmt.Errorf("%w: requires exactly one enabled managed human admin, found %d", ErrStrandedAdminRecoveryIneligible, len(adminIDs))
+		}
+		principalID = adminIDs[0]
+	} else {
+		principalID, err = selectedAdminRecoveryTargetTx(ctx, tx, selector, adminIDs)
+		if err != nil {
+			return PrincipalToken{}, err
+		}
+		auditReason = selectedAdminRecoveryAuditReason
+		targetLabel = "selected"
 	}
 
-	principalID := adminIDs[0]
 	var tokenCount int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cloud_principal_tokens`).Scan(&tokenCount); err != nil {
 		return PrincipalToken{}, fmt.Errorf("cloudstore: count stranded admin recovery tokens: %w", err)
@@ -578,7 +602,7 @@ func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, pa
 			return PrincipalToken{}, fmt.Errorf("%w: replacement requires exactly one active principal token, found %d", ErrStrandedAdminRecoveryIneligible, activeTokenCount)
 		}
 		if existing.PrincipalID != principalID || existing.LastUsedAt != nil {
-			return PrincipalToken{}, fmt.Errorf("%w: replacement requires one unused active token owned by the sole enabled managed human admin", ErrStrandedAdminRecoveryIneligible)
+			return PrincipalToken{}, fmt.Errorf("%w: replacement requires one unused active token owned by the %s enabled managed human admin", ErrStrandedAdminRecoveryIneligible, targetLabel)
 		}
 		res, err := tx.ExecContext(ctx, `
 			UPDATE cloud_principal_tokens
@@ -609,7 +633,7 @@ func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, pa
 	audit.Project = ""
 	audit.Action = strandedAdminRecoveryAuditAction
 	audit.Outcome = strandedAdminRecoveryAuditOutcome
-	audit.ReasonCode = strandedAdminRecoveryAuditReason
+	audit.ReasonCode = auditReason
 	if err := insertAuthAuditEvent(ctx, tx, audit); err != nil {
 		return PrincipalToken{}, fmt.Errorf("%w: %w", ErrAuthAuditInsertFailed, err)
 	}
@@ -617,6 +641,52 @@ func (cs *CloudStore) RecoverStrandedAdminTokenWithAudit(ctx context.Context, pa
 		return PrincipalToken{}, fmt.Errorf("cloudstore: commit stranded admin token recovery tx: %w", err)
 	}
 	return token, nil
+}
+
+// selectedAdminRecoveryTargetTx resolves an operator-supplied principal id or
+// exact username to an enabled managed human admin. adminIDs must be the
+// enabled-admin set read under the active-admin guard; membership in it is
+// the final eligibility authority.
+func selectedAdminRecoveryTargetTx(ctx context.Context, tx *sql.Tx, selector string, adminIDs []string) (string, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT p.id::text, p.kind, p.role, p.enabled, h.principal_id IS NOT NULL
+		FROM cloud_principals p
+		LEFT JOIN cloud_human_users h ON h.principal_id = p.id
+		WHERE p.id::text = $1 OR h.username = $1
+		ORDER BY p.id`, selector)
+	if err != nil {
+		return "", fmt.Errorf("cloudstore: find selected admin recovery target: %w", err)
+	}
+	defer rows.Close()
+	type candidate struct {
+		id, kind, role string
+		enabled, human bool
+	}
+	var matches []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.kind, &c.role, &c.enabled, &c.human); err != nil {
+			return "", fmt.Errorf("cloudstore: scan selected admin recovery target: %w", err)
+		}
+		matches = append(matches, c)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("cloudstore: iterate selected admin recovery targets: %w", err)
+	}
+	switch {
+	case len(matches) == 0:
+		return "", fmt.Errorf("%w: selected principal %q was not found", ErrStrandedAdminRecoveryIneligible, selector)
+	case len(matches) > 1:
+		return "", fmt.Errorf("%w: selected principal %q matches more than one principal by id and username", ErrStrandedAdminRecoveryIneligible, selector)
+	}
+	selected := matches[0]
+	if !selected.enabled {
+		return "", fmt.Errorf("%w: selected principal %q is disabled", ErrStrandedAdminRecoveryIneligible, selector)
+	}
+	if selected.kind != PrincipalKindHuman || selected.role != PrincipalRoleAdmin || !selected.human || !slices.Contains(adminIDs, selected.id) {
+		return "", fmt.Errorf("%w: selected principal %q is not a managed human admin", ErrStrandedAdminRecoveryIneligible, selector)
+	}
+	return selected.id, nil
 }
 
 func lockPrincipalTokenTargetTx(ctx context.Context, tx *sql.Tx, principalID string) error {

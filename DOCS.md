@@ -227,7 +227,7 @@ engram version                Show version
 
 For `setup [agent]`, see [Agent Setup](docs/AGENT-SETUP.md) for supported integrations rather than treating a fixed agent list as exhaustive. `--all` deliberately selects every project for applicable reads and local sync export (cloud sync still requires a single project); do not combine it with an explicit project. `engram context [project]` accepts the positional project as an alternative to `--project`. `projects prune --paths-only` limits candidates to names containing `/` or `\`.
 
-Cloud commands include `cloud status`, `cloud config --server <url>`, `cloud enroll <project>`, `cloud unenroll <project>`, and `cloud serve`. For upgrades, use `cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>`; `remirror` rebuilds cloud state from authoritative local data. Server-side repair uses `cloud repair materialize-mutations --project <project> (--dry-run|--apply)`. Managed-admin setup uses `cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]`; stranded-admin token recovery uses `cloud bootstrap recover-token [--name <name>] [--revoke-existing]`. Operator backups use `cloud backup export --output <path|-> [--force]` and `cloud backup import --input <path|-> (--dry-run|--apply)` (see [Cloud Backup and Restore](#cloud-backup-and-restore)). See [Cloud CLI](#cloud-cli-opt-in) and [managed-user bootstrap](#managed-users-tokens-and-cli-bootstrap) for constraints and detailed syntax.
+Cloud commands include `cloud status`, `cloud config --server <url>`, `cloud enroll <project>`, `cloud unenroll <project>`, and `cloud serve`. For upgrades, use `cloud upgrade <doctor|repair|bootstrap|remirror|status|rollback> --project <name>`; `remirror` rebuilds cloud state from authoritative local data. Server-side repair uses `cloud repair materialize-mutations --project <project> (--dry-run|--apply)`. Managed-admin setup uses `cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]`; stranded-admin token recovery uses `cloud bootstrap recover-token [--principal <id|username>] [--name <name>] [--revoke-existing]`. Operator backups use `cloud backup export --output <path|-> [--force]` and `cloud backup import --input <path|-> (--dry-run|--apply)` (see [Cloud Backup and Restore](#cloud-backup-and-restore)). See [Cloud CLI](#cloud-cli-opt-in) and [managed-user bootstrap](#managed-users-tokens-and-cli-bootstrap) for constraints and detailed syntax.
 
 ---
 
@@ -1054,7 +1054,7 @@ Potentially recoverable retry-cap relations are excluded from both age pruning a
 - `engram cloud upgrade rollback --project <project>` — restore pre-upgrade local snapshot before `bootstrap_verified`; blocked afterwards
 - `engram cloud repair materialize-mutations --project <project> (--dry-run|--apply)` — explicit server-side Postgres repair that backfills existing `cloud_mutations` into compatible `cloud_chunks` without deleting remote data
 - `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` — create the first managed admin (see [Managed users, tokens, and CLI bootstrap](#managed-users-tokens-and-cli-bootstrap))
-- `engram cloud bootstrap recover-token [--name <name>] [--revoke-existing]` — recover the stranded managed admin token state described below
+- `engram cloud bootstrap recover-token [--principal <id|username>] [--name <name>] [--revoke-existing]` — recover the stranded managed admin token state described below; `--principal` selects one admin when several exist (for example after a backup restore)
 - `engram cloud backup export --output <path|-> [--force]` — write a logical backup archive of the Cloud database at `ENGRAM_DATABASE_URL` (see [Cloud Backup and Restore](#cloud-backup-and-restore))
 - `engram cloud backup import --input <path|-> (--dry-run|--apply)` — restore a backup archive into an empty Cloud database at `ENGRAM_DATABASE_URL`
 
@@ -1158,6 +1158,14 @@ engram cloud bootstrap recover-token --name replacement --revoke-existing
 
 This path requires exactly one enabled managed human admin and exactly one active principal token. That token must be unrevoked, never used, and owned by the sole enabled admin; the command atomically revokes it and creates the replacement while preserving grants. Earlier revoked recovery tokens may remain as audit history. If the replacement output is lost again, retry `--revoke-existing` while the current token remains unused; once it has been used, this escape hatch never replaces it. The command refuses used, revoked/inactive, ambiguous, or multiple-active-token states.
 
+When several enabled managed human admins exist and no principal token exists anywhere in the deployment (the state after [a backup restore](#cloud-backup-and-restore)), select the admin explicitly by principal id or exact username:
+
+```bash
+engram cloud bootstrap recover-token --principal alice --name restored
+```
+
+`--principal` applies the same token rules as above to the selected admin: it requires zero principal tokens, or, with `--revoke-existing`, exactly one unused active token owned by the selected admin. It refuses an unknown principal, a selector that matches one principal's id and another's username, a disabled principal, and a principal that is not a managed human admin; a refusal creates no token and no audit event. A successful recovery records a `bootstrap.cli` audit event with reason `selected_admin_token_recovered` and the selector in its metadata. Without `--principal`, the command behaves exactly as described above.
+
 **Runtime authentication:** `engram cloud serve` resolves managed tokens first, then falls back to the legacy env-token credentials (`ENGRAM_CLOUD_TOKEN` for sync and `ENGRAM_CLOUD_ADMIN` for dashboard access), on every `/sync/*`, `/admin/*`, and dashboard-login request. Authentication does not grant managed-user mutation authority: only a managed-token admin principal may create or enable/disable users, create or revoke tokens, or create or revoke project grants.
 
 - Set `ENGRAM_CLOUD_TOKEN_PEPPER` to enable managed-token authentication. A token issued by `engram cloud bootstrap admin --issue-token` (or by the dashboard/`/admin/*` token-create routes) then authenticates directly against `/sync/*` and `/admin/*`, and can log into the dashboard as its resolved principal/role.
@@ -1246,7 +1254,7 @@ ENGRAM_DATABASE_URL='postgres://<fresh-db>' engram cloud backup import --input e
 
 **After `--apply`:**
 
-- Managed tokens are not restored. Re-issue a token for every managed principal and have each client re-run its token setup. When the restored deployment has exactly one enabled managed admin, `engram cloud bootstrap recover-token` issues that admin's first token (requires `ENGRAM_CLOUD_TOKEN_PEPPER`); that admin can then issue the other tokens.
+- Managed tokens are not restored. Re-issue a token for every managed principal and have each client re-run its token setup. Run `engram cloud bootstrap recover-token --principal <id|username>` to issue the first token for one enabled managed admin (requires `ENGRAM_CLOUD_TOKEN_PEPPER`); with exactly one enabled managed admin, `--principal` may be omitted. It works only while no token exists, so run it once; that admin then issues the other tokens from the dashboard or `/admin/*` routes.
 - Legacy `cloud_users` rows are restored without password hashes and cannot log in.
 - Run `engram cloud bootstrap admin` only if the backup held no managed admin.
 
