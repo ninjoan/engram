@@ -226,3 +226,75 @@ func TestManualRunAgainstPostgresHonorsRunningAndStaleRows(t *testing.T) {
 		t.Fatalf("stale run = %+v, want interrupted", runs[1])
 	}
 }
+
+// A server busy with a manual run does not claim a scheduled slot, so a
+// free server on the same database uploads it.
+func TestBusyRunnerLeavesTheSlotToAFreeRunnerOnPostgres(t *testing.T) {
+	cs, _ := openRunnerTestStore(t)
+	ctx := context.Background()
+	manualPut := make(chan struct{})
+	release := make(chan struct{})
+	var manualOnce sync.Once
+	s3 := &countingS3{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "20261130T025900Z") { // the manual run started at 02:59
+			_, _ = io.Copy(io.Discard, r.Body)
+			manualOnce.Do(func() { close(manualPut) })
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		s3.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) }) // runs before srv.Close
+	sealer := storeTestDestination(t, cs, srv.URL)
+	if err := cs.PutBackupSchedule(ctx, cloudstore.PutBackupScheduleParams{Enabled: true, Weekdays: []time.Weekday{time.Monday}, TimeOfDay: "03:00", Timezone: "UTC", Actor: cloudstore.BackupDestinationActor{Source: "test"}}); err != nil {
+		t.Fatalf("PutBackupSchedule: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	newServer := func() (*Runner, *fakeClock, *logSink) {
+		clock, logs := newFakeClock(beforeSlot), &logSink{}
+		runner, err := New(Config{Store: cs, Key: sealer, Clock: clock, TempDir: t.TempDir(), Logf: logs.Logf, EngramVersion: "test"})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		runner.Start(runCtx)
+		t.Cleanup(func() { waitDone(t, "runner shutdown", runner.Wait) })
+		return runner, clock, logs
+	}
+	busy, busyClock, busyLogs := newServer()
+	_, freeClock, _ := newServer()
+	t.Cleanup(cancel) // registered last: runs before the Wait cleanups
+	busyClock.waitSleeping(t)
+	freeClock.waitSleeping(t)
+
+	if _, err := busy.StartManualBackup(ctx, ""); err != nil {
+		t.Fatalf("manual run: %v", err)
+	}
+	select {
+	case <-manualPut:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the manual upload never reached the destination")
+	}
+	busyClock.Advance(time.Minute)
+	waitFor(t, "the busy server to pass the slot", func() bool {
+		return strings.Contains(busyLogs.text(), "not claimed: this server is still running another backup")
+	})
+	busyClock.waitSleeping(t)
+	if runs, err := cs.ListBackupRuns(ctx, 10); err != nil || len(runs) != 1 || runs[0].Trigger != cloudstore.BackupRunTriggerManual {
+		t.Fatalf("runs after the busy server passed the slot = %+v, %v; want only the manual run", runs, err)
+	}
+
+	freeClock.Advance(time.Minute)
+	waitFor(t, "the free server's upload", func() bool {
+		runs, err := cs.ListBackupRuns(ctx, 10)
+		return err == nil && len(runs) == 2 && runs[0].Trigger == cloudstore.BackupRunTriggerScheduled && runs[0].Status == cloudstore.BackupRunStatusSuccess
+	})
+	if puts, _, _ := s3.snapshot(); len(puts) != 1 || puts[0] != "/engram-backups/shared/engram-cloud-backup-20261130T030000Z.tar.gz" {
+		t.Fatalf("scheduled PUTs = %v, want the 03:00 slot once", puts)
+	}
+}

@@ -8,8 +8,11 @@
 //
 // Several servers may share one database: a scheduled slot is claimed with a
 // unique history row (cloudstore.StartBackupRun), so exactly one server
-// uploads it. A run that stays "running" past the stale threshold belongs to
-// a server that stopped mid-run and is marked interrupted.
+// uploads it; a server busy with another run leaves the slot to the others.
+// A run that stays "running" past the stale threshold belongs to a server
+// that stopped mid-run and is marked interrupted. When it starts, the runner
+// removes archive temp files that a killed server left in its temp
+// directory.
 package backuprunner
 
 import (
@@ -19,6 +22,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -53,6 +57,10 @@ const (
 
 	// finishTimeout bounds recording a result, even during shutdown.
 	finishTimeout = 30 * time.Second
+
+	// archiveTempPattern names the archive temp file of a run; the startup
+	// sweep removes only regular files matching it.
+	archiveTempPattern = "engram-cloud-backup-*.tar.gz"
 )
 
 // Messages recorded in the run history. A slot that could not run is
@@ -60,7 +68,6 @@ const (
 const (
 	SkippedNoDestinationMessage = "skipped: no backup destination is configured"
 	SkippedKeyMismatchMessage   = "skipped: the stored destination credentials cannot be opened with the current ENGRAM_CLOUD_BACKUP_KEY; save the destination again"
-	SkippedBusyMessage          = "skipped: another backup was still running on this server"
 	CanceledMessage             = "canceled: the server stopped before the backup finished"
 	InternalErrorMessage        = "internal error while running the backup; see the server log"
 )
@@ -186,7 +193,7 @@ func New(cfg Config) (*Runner, error) {
 	if r.uploadDeadline == nil {
 		r.uploadDeadline = UploadDeadline
 	}
-	if longest := r.exportTimeout + UploadDeadline(s3client.MaxObjectSize); r.staleAfter <= longest {
+	if longest := r.exportTimeout + r.uploadDeadline(s3client.MaxObjectSize); r.staleAfter <= longest {
 		return nil, fmt.Errorf("backuprunner: the stale threshold %s must exceed the longest run (%s)", r.staleAfter, longest)
 	}
 	if r.tempDir == "" {
@@ -215,14 +222,17 @@ func newS3Uploader(creds cloudstore.BackupDestinationCredentials) (Uploader, err
 	})
 }
 
-// Start launches the scheduler loop. Cancel ctx to stop it, then call Wait;
-// a run in progress is canceled and recorded as such. Start runs once.
+// Start removes stale archive temp files, then launches the scheduler loop.
+// Cancel ctx to stop it, then call Wait; a run in progress is canceled and
+// recorded as such. Start runs once.
 func (r *Runner) Start(ctx context.Context) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.base != nil || r.stopped {
 		return
 	}
+	// Before any run of this process can create its own temp file.
+	r.sweepStaleArchives()
 	r.base = ctx
 	r.wg.Add(1)
 	go r.loop(ctx)
@@ -324,14 +334,17 @@ func laterOf(a, b time.Time) time.Time {
 }
 
 // runScheduled claims slot for this server and runs it. A slot another
-// server already claimed is skipped without a trace; a slot that arrives
-// while this server is still running a backup is recorded as skipped.
+// server already claimed is skipped without a trace. A slot that arrives
+// while this server is still running a backup is not claimed, so a free
+// server sharing the database can run it; with no such server it is not
+// run at all.
 func (r *Runner) runScheduled(ctx context.Context, slot time.Time) {
-	busy := !r.busy.CompareAndSwap(false, true)
-	if !busy {
-		defer r.busy.Store(false)
-		r.expireStale(ctx)
+	if !r.busy.CompareAndSwap(false, true) {
+		r.logf("[engram-cloud] scheduled backup %s not claimed: this server is still running another backup; another server may run it", slot.UTC().Format(time.RFC3339))
+		return
 	}
+	defer r.busy.Store(false)
+	r.expireStale(ctx)
 	run, err := r.store.StartBackupRun(ctx, cloudstore.StartBackupRunParams{Trigger: cloudstore.BackupRunTriggerScheduled, ScheduledFor: slot})
 	switch {
 	case errors.Is(err, cloudstore.ErrBackupRunAlreadyRecorded):
@@ -343,11 +356,37 @@ func (r *Runner) runScheduled(ctx context.Context, slot time.Time) {
 		}
 		return
 	}
-	if busy {
-		r.finish(ctx, cloudstore.FinishBackupRunParams{ID: run.ID, Status: cloudstore.BackupRunStatusFailure, ErrorMessage: SkippedBusyMessage})
+	r.execute(ctx, run, slot)
+}
+
+// sweepStaleArchives removes the archive temp files that a server of this
+// user left in the temp directory when it was killed (SIGKILL, out of
+// memory) before its own cleanup ran. It removes only regular files named
+// like the archive and owned by this user; symlinks are never followed.
+func (r *Runner) sweepStaleArchives() {
+	entries, err := os.ReadDir(r.tempDir)
+	if err != nil {
+		r.logf("[engram-cloud] backup runner: sweep stale archive temp files: %v", err)
 		return
 	}
-	r.execute(ctx, run, slot)
+	removed := 0
+	for _, entry := range entries {
+		if match, _ := filepath.Match(archiveTempPattern, entry.Name()); !match || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info() // lstat: a symlink is never followed
+		if err != nil || !info.Mode().IsRegular() || !ownedByCurrentUser(info) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(r.tempDir, entry.Name())); err != nil {
+			r.logf("[engram-cloud] backup runner: remove stale archive temp file: %v", err)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		r.logf("[engram-cloud] backup runner: removed %d stale backup archive temp file(s) from %s", removed, r.tempDir)
+	}
 }
 
 // expireStale marks runs left "running" by a stopped server as interrupted.
@@ -403,7 +442,7 @@ func (r *Runner) execute(ctx context.Context, run cloudstore.BackupRun, stamp ti
 // exportAndUpload writes the archive to a private temp file and uploads it
 // under an overall deadline. The temp file is always removed.
 func (r *Runner) exportAndUpload(ctx context.Context, uploader Uploader, key string) (int64, error) {
-	file, err := os.CreateTemp(r.tempDir, "engram-cloud-backup-*.tar.gz") // mode 0600
+	file, err := os.CreateTemp(r.tempDir, archiveTempPattern) // mode 0600
 	if err != nil {
 		return 0, fmt.Errorf("create the archive temp file: %w", err)
 	}

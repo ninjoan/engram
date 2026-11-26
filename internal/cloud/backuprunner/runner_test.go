@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -291,11 +293,13 @@ func TestManualBackupRefusedWhileARunIsRunning(t *testing.T) {
 	}
 }
 
-func TestScheduledSlotWhileAManualRunIsRunningIsRecordedAsSkipped(t *testing.T) {
+// A server busy with another run leaves a scheduled slot unclaimed, so a
+// free server sharing the database can still upload it.
+func TestScheduledSlotWhileBusyIsLeftForAnotherServer(t *testing.T) {
 	release := make(chan struct{})
-	h := newHarness(t, beforeSlot, nil)
-	h.store.setSchedule(mondayAt3())
-	h.uploader.block = func(ctx context.Context) error {
+	busy := newHarness(t, beforeSlot, nil)
+	busy.store.setSchedule(mondayAt3())
+	busy.uploader.block = func(ctx context.Context) error {
 		select {
 		case <-release:
 			return nil
@@ -303,21 +307,59 @@ func TestScheduledSlotWhileAManualRunIsRunningIsRecordedAsSkipped(t *testing.T) 
 			return ctx.Err()
 		}
 	}
-	h.start(t)
-	h.clock.waitSleeping(t)
-	if _, err := h.runner.StartManualBackup(context.Background(), "1"); err != nil {
+	busy.start(t)
+	busy.clock.waitSleeping(t)
+	manual, err := busy.runner.StartManualBackup(context.Background(), "1")
+	if err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the manual upload to start", func() bool { return h.runner.busy.Load() })
-	h.clock.Advance(time.Minute)
-	waitFor(t, "the skipped slot", func() bool { return len(h.store.snapshot()) == 2 })
-	h.clock.waitSleeping(t)
-	skipped := h.store.snapshot()[1]
-	if skipped.Trigger != cloudstore.BackupRunTriggerScheduled || skipped.Status != cloudstore.BackupRunStatusFailure || skipped.ErrorMessage != SkippedBusyMessage {
-		t.Fatalf("slot during a manual run = %+v, want failure %q", skipped, SkippedBusyMessage)
+	waitFor(t, "the manual upload to start", func() bool { return busy.runner.busy.Load() })
+
+	freeClock, freeLogs, freeUploader := newFakeClock(beforeSlot), &logSink{}, &fakeUploader{}
+	free, err := New(Config{
+		Store: busy.store, Key: fakeOpener{}, Clock: freeClock, TempDir: t.TempDir(), Export: writeArchive,
+		NewUploader: func(cloudstore.BackupDestinationCredentials) (Uploader, error) { return freeUploader, nil },
+		Logf:        freeLogs.Logf,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	freeCtx, cancelFree := context.WithCancel(context.Background())
+	free.Start(freeCtx)
+	t.Cleanup(func() {
+		cancelFree()
+		waitDone(t, "free runner shutdown", free.Wait)
+	})
+	freeClock.waitSleeping(t)
+
+	// The busy server reaches the slot first and must not claim it.
+	busy.clock.Advance(time.Minute)
+	waitFor(t, "the busy server to pass the slot", func() bool {
+		return strings.Contains(busy.logs.text(), "not claimed: this server is still running another backup")
+	})
+	busy.clock.waitSleeping(t)
+	if runs := busy.store.snapshot(); len(runs) != 1 || runs[0].ID != manual {
+		t.Fatalf("runs after the busy server passed the slot = %+v, want only the manual run", runs)
+	}
+
+	// The free server claims and uploads it.
+	freeClock.Advance(time.Minute)
+	waitFor(t, "the free server's scheduled run", func() bool {
+		runs := busy.store.snapshot()
+		return len(runs) == 2 && runs[1].Status == cloudstore.BackupRunStatusSuccess
+	})
+	scheduled := busy.store.snapshot()[1]
+	if scheduled.Trigger != cloudstore.BackupRunTriggerScheduled || !scheduled.ScheduledFor.Equal(slot) {
+		t.Fatalf("scheduled run = %+v, want the %s slot", scheduled, slot)
+	}
+	if puts := freeUploader.snapshot(); len(puts) != 1 {
+		t.Fatalf("free server uploads = %d, want 1", len(puts))
 	}
 	close(release)
-	waitFor(t, "the manual run", func() bool { return h.store.snapshot()[0].Status == cloudstore.BackupRunStatusSuccess })
+	waitFor(t, "the manual run", func() bool { return busy.store.snapshot()[0].Status == cloudstore.BackupRunStatusSuccess })
+	if puts := busy.uploader.snapshot(); len(puts) != 1 || !strings.Contains(puts[0].key, "engram-cloud-backup-20261130T025900Z") {
+		t.Fatalf("busy server uploads = %+v, want only the manual run", puts)
+	}
 }
 
 func TestUploadFailureIsRecordedWithoutCredentials(t *testing.T) {
@@ -492,6 +534,38 @@ func TestNewRejectsIncompleteConfig(t *testing.T) {
 	}
 }
 
+// The stale threshold must exceed the export timeout plus the deadline of a
+// maximum-size upload, including a custom UploadDeadline.
+func TestNewRejectsAnUploadDeadlineReachingTheStaleThreshold(t *testing.T) {
+	store := newFakeStore()
+	var sizes []int64
+	deadline := func(d time.Duration) func(int64) time.Duration {
+		return func(size int64) time.Duration {
+			sizes = append(sizes, size)
+			return d
+		}
+	}
+	// 2h export + 4h upload = the 6h default threshold: refused.
+	_, err := New(Config{Store: store, Key: fakeOpener{}, UploadDeadline: deadline(4 * time.Hour)})
+	if err == nil || !strings.Contains(err.Error(), "the stale threshold 6h0m0s must exceed the longest run (6h0m0s)") {
+		t.Fatalf("New with a 4h upload deadline: %v, want the stale threshold refusal", err)
+	}
+	if len(sizes) != 1 || sizes[0] != s3client.MaxObjectSize {
+		t.Fatalf("upload deadline consulted for sizes %v, want the maximum object size", sizes)
+	}
+	// A longer threshold accepts the same deadline; a shorter deadline fits the default.
+	if _, err := New(Config{Store: store, Key: fakeOpener{}, StaleAfter: 6*time.Hour + time.Second, UploadDeadline: deadline(4 * time.Hour)}); err != nil {
+		t.Fatalf("New with a longer stale threshold: %v", err)
+	}
+	if _, err := New(Config{Store: store, Key: fakeOpener{}, UploadDeadline: deadline(4*time.Hour - time.Second)}); err != nil {
+		t.Fatalf("New with an upload deadline below the threshold: %v", err)
+	}
+	// Previous behavior: the default deadline fits the default threshold.
+	if _, err := New(Config{Store: store, Key: fakeOpener{}}); err != nil {
+		t.Fatalf("New with the defaults: %v", err)
+	}
+}
+
 func TestManualBackupBeforeStartIsRefused(t *testing.T) {
 	h := newHarness(t, beforeSlot, nil)
 	if _, err := h.runner.StartManualBackup(context.Background(), "1"); !errors.Is(err, ErrRunnerStopped) {
@@ -507,4 +581,147 @@ func TestDefaultTempDirIsTheSystemTempDir(t *testing.T) {
 	if h.runner.tempDir != os.TempDir() {
 		t.Fatalf("temp dir = %q, want %q", h.runner.tempDir, os.TempDir())
 	}
+}
+
+// Start removes archive temp files a killed server left behind: only
+// regular files named like the archive, never symlinks, directories or
+// other names.
+func TestStartRemovesStaleArchiveTempFilesOnly(t *testing.T) {
+	h := newHarness(t, beforeSlot, nil)
+	write := func(path string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("plaintext archive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := []string{"engram-cloud-backup-123456789.tar.gz", "engram-cloud-backup-.tar.gz"}
+	kept := []string{
+		"engram-cloud-backup-1.tar", "engram-cloud-backup-1.tar.gz.part", "other-123.tar.gz",
+		"xengram-cloud-backup-1.tar.gz", "engram-cloud-backup-export-1",
+	}
+	for _, name := range append(append([]string(nil), stale...), kept...) {
+		write(filepath.Join(h.tempDir, name))
+	}
+	dirName := "engram-cloud-backup-dir.tar.gz"
+	if err := os.Mkdir(filepath.Join(h.tempDir, dirName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(h.tempDir, dirName, "inside"))
+	target := filepath.Join(t.TempDir(), "engram-cloud-backup-target.tar.gz")
+	write(target)
+	link := "engram-cloud-backup-link.tar.gz"
+	symlinked := os.Symlink(target, filepath.Join(h.tempDir, link)) == nil
+	if symlinked {
+		kept = append(kept, link)
+	}
+
+	h.start(t)
+	h.clock.waitSleeping(t)
+
+	for _, name := range stale {
+		if _, err := os.Lstat(filepath.Join(h.tempDir, name)); !os.IsNotExist(err) {
+			t.Errorf("stale archive %s was not removed (%v)", name, err)
+		}
+	}
+	for _, name := range append(kept, dirName, filepath.Join(dirName, "inside")) {
+		if _, err := os.Lstat(filepath.Join(h.tempDir, name)); err != nil {
+			t.Errorf("%s was removed: %v", name, err)
+		}
+	}
+	if symlinked {
+		if info, err := os.Lstat(filepath.Join(h.tempDir, link)); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("symlink changed: %v %v", info, err)
+		}
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "plaintext archive" {
+		t.Errorf("symlink target changed: %q %v", data, err)
+	}
+	if logs := h.logs.text(); !strings.Contains(logs, "removed 2 stale backup archive temp file(s) from "+h.tempDir) {
+		t.Errorf("logs = %q, want the removed count", logs)
+	}
+}
+
+// An empty temp directory is swept silently.
+func TestStartWithoutStaleArchivesLogsNothing(t *testing.T) {
+	h := newHarness(t, beforeSlot, nil)
+	h.start(t)
+	h.clock.waitSleeping(t)
+	if logs := h.logs.text(); strings.Contains(logs, "stale backup archive") {
+		t.Fatalf("logs = %q, want no sweep line", logs)
+	}
+}
+
+// The archive temp file is private to the server user and lives in the
+// configured temp directory.
+func TestArchiveTempFileIsPrivateAndInTheTempDir(t *testing.T) {
+	var mode os.FileMode
+	var dir string
+	h := newHarness(t, beforeSlot, func(cfg *Config) {
+		cfg.Export = func(ctx context.Context, w io.Writer) error {
+			f, ok := w.(*os.File)
+			if !ok {
+				return fmt.Errorf("export writer is %T, want the temp file", w)
+			}
+			info, err := f.Stat()
+			if err != nil {
+				return err
+			}
+			mode, dir = info.Mode().Perm(), filepath.Dir(f.Name())
+			return writeArchive(ctx, w)
+		}
+	})
+	h.start(t)
+	if _, err := h.runner.StartManualBackup(context.Background(), "1"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the run", func() bool {
+		runs := h.store.snapshot()
+		return len(runs) == 1 && runs[0].Status != cloudstore.BackupRunStatusRunning
+	})
+	if run := h.store.snapshot()[0]; run.Status != cloudstore.BackupRunStatusSuccess {
+		t.Fatalf("run = %+v", run)
+	}
+	if dir != h.tempDir {
+		t.Fatalf("temp file dir = %s, want %s", dir, h.tempDir)
+	}
+	if runtime.GOOS != "windows" && mode != 0o600 {
+		t.Fatalf("temp file mode = %o, want 600", mode)
+	}
+	h.assertTempDirEmpty(t)
+}
+
+type credentialEchoError struct{ msg string }
+
+func (e *credentialEchoError) Error() string { return e.msg }
+
+// An uploader that cannot be built from the destination records its error
+// without the credentials it may echo, and uploads nothing.
+func TestInvalidDestinationErrorIsRecordedWithoutCredentials(t *testing.T) {
+	h := newHarness(t, beforeSlot, func(cfg *Config) {
+		cfg.NewUploader = func(creds cloudstore.BackupDestinationCredentials) (Uploader, error) {
+			return nil, &credentialEchoError{msg: "bad endpoint for " + creds.SecretAccessKey + " id=" + creds.AccessKeyID}
+		}
+	})
+	h.start(t)
+	if _, err := h.runner.StartManualBackup(context.Background(), "1"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the run", func() bool {
+		runs := h.store.snapshot()
+		return len(runs) == 1 && runs[0].Status != cloudstore.BackupRunStatusRunning
+	})
+	run := h.store.snapshot()[0]
+	if run.Status != cloudstore.BackupRunStatusFailure || !strings.HasPrefix(run.ErrorMessage, "invalid backup destination: bad endpoint for") {
+		t.Fatalf("run = %+v, want the invalid destination failure", run)
+	}
+	for _, secret := range []string{testAccessKeyID, testSecretKey} {
+		if strings.Contains(run.ErrorMessage, secret) {
+			t.Fatalf("stored error leaks a credential: %q", run.ErrorMessage)
+		}
+	}
+	if n := len(h.uploader.snapshot()); n != 0 {
+		t.Fatalf("uploads = %d, want 0", n)
+	}
+	h.assertTempDirEmpty(t)
+	h.assertNoSecretsLogged(t)
 }
