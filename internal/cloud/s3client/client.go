@@ -47,11 +47,12 @@ const (
 // Config describes an S3-compatible destination. Formatting a Config with
 // any fmt verb never prints SecretAccessKey and masks AccessKeyID.
 type Config struct {
-	Endpoint        string // scheme://host[:port], e.g. https://<account>.r2.cloudflarestorage.com
-	Region          string // defaults to DefaultRegion
-	Bucket          string
-	AccessKeyID     string
-	SecretAccessKey string
+	Endpoint string // scheme://host[:port], e.g. https://<account>.r2.cloudflarestorage.com
+	Region   string // defaults to DefaultRegion
+	Bucket   string
+	// The credentials are never JSON-encoded; Format redacts them too.
+	AccessKeyID     string `json:"-"`
+	SecretAccessKey string `json:"-"`
 	// HTTPClient is optional. It is copied, never mutated; redirects are
 	// always refused. Its Timeout is kept as is (zero means no overall
 	// deadline); a nil Transport becomes one with dial, TLS handshake,

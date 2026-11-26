@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 	"unicode"
@@ -62,8 +63,8 @@ type PutBackupDestinationParams struct {
 	Region          string
 	Bucket          string
 	Prefix          string
-	AccessKeyID     string
-	SecretAccessKey string
+	AccessKeyID     string `json:"-"`
+	SecretAccessKey string `json:"-"`
 	Actor           BackupDestinationActor
 }
 
@@ -83,14 +84,14 @@ type BackupDestination struct {
 }
 
 // BackupDestinationCredentials is the opened destination, for the uploader
-// only. It formats without its credentials.
+// only. It formats and JSON-encodes without its credentials.
 type BackupDestinationCredentials struct {
 	Endpoint        string
 	Region          string
 	Bucket          string
 	Prefix          string
-	AccessKeyID     string
-	SecretAccessKey string
+	AccessKeyID     string `json:"-"`
+	SecretAccessKey string `json:"-"`
 }
 
 // Format prints the destination with both credentials redacted.
@@ -138,7 +139,7 @@ func (cs *CloudStore) PutBackupDestination(ctx context.Context, params PutBackup
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")
 	}
-	if sealer == nil {
+	if isNilBackupKeyHolder(sealer) {
 		return ErrBackupDestinationKeyRequired
 	}
 	target, accessKeyID, secret, err := normalizeBackupDestination(params)
@@ -236,7 +237,7 @@ func (cs *CloudStore) OpenBackupDestinationCredentials(ctx context.Context, open
 	if cs == nil || cs.db == nil {
 		return BackupDestinationCredentials{}, fmt.Errorf("cloudstore: not initialized")
 	}
-	if opener == nil {
+	if isNilBackupKeyHolder(opener) {
 		return BackupDestinationCredentials{}, ErrBackupDestinationKeyRequired
 	}
 	var target backupDestinationTarget
@@ -262,6 +263,21 @@ func (cs *CloudStore) OpenBackupDestinationCredentials(ctx context.Context, open
 		Endpoint: target.endpoint, Region: target.region, Bucket: target.bucket, Prefix: target.prefix,
 		AccessKeyID: string(accessKeyID), SecretAccessKey: string(secret),
 	}, nil
+}
+
+// isNilBackupKeyHolder reports a nil sealer or opener, including a typed nil
+// pointer such as a (*backupcrypto.Sealer)(nil) from an unset key, which
+// would otherwise pass a plain nil check and panic on first use.
+func isNilBackupKeyHolder(holder any) bool {
+	if holder == nil {
+		return true
+	}
+	v := reflect.ValueOf(holder)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return v.IsNil()
+	}
+	return false
 }
 
 // normalizeBackupDestination validates params. Error messages never echo a
@@ -306,7 +322,7 @@ func normalizeBackupEndpoint(raw string) (string, string) {
 	const reason = "endpoint must be an https origin such as https://<account>.r2.cloudflarestorage.com (http only for loopback hosts)"
 	raw = strings.TrimSpace(raw)
 	parsed, err := url.Parse(raw)
-	if err != nil || raw == "" || parsed.Opaque != "" || parsed.User != nil || parsed.Host == "" ||
+	if err != nil || raw == "" || parsed.Opaque != "" || parsed.User != nil || parsed.Hostname() == "" ||
 		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
 		return "", reason
 	}

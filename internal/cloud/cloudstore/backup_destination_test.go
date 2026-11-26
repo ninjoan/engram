@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -402,5 +403,98 @@ func TestDeletingTheUpdatingPrincipalKeepsTheDestination(t *testing.T) {
 	got, err := cs.GetBackupDestination(ctx)
 	if err != nil || !got.Configured || got.UpdatedByPrincipalID != "" {
 		t.Fatalf("Get after principal delete = %+v, %v", got, err)
+	}
+}
+
+func TestBackupDestinationCredentialsJSONOmitsCredentials(t *testing.T) {
+	creds := BackupDestinationCredentials{
+		Endpoint: "https://acct.r2.cloudflarestorage.com", Region: "auto", Bucket: "engram-backups", Prefix: "prod/",
+		AccessKeyID: testDestinationAccessKeyID, SecretAccessKey: testDestinationSecret,
+	}
+	type wrapper struct{ Creds BackupDestinationCredentials }
+	for name, value := range map[string]any{"value": creds, "pointer": &creds, "nested": wrapper{Creds: creds}} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("%s: json.Marshal: %v", name, err)
+		}
+		text := string(encoded)
+		if strings.Contains(text, testDestinationSecret) || strings.Contains(text, testDestinationAccessKeyID) {
+			t.Fatalf("%s: json.Marshal leaked a credential: %s", name, text)
+		}
+		if !strings.Contains(text, `"engram-backups"`) {
+			t.Fatalf("%s: json.Marshal dropped the non-secret fields: %s", name, text)
+		}
+	}
+}
+
+func TestBackupDestinationRejectsTypedNilSealerWithoutWriting(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+	adminID := seedDestinationAdmin(t, cs)
+	var nilSealer *backupcrypto.Sealer
+
+	if err := cs.PutBackupDestination(ctx, validDestinationParams(adminID), nilSealer); !errors.Is(err, ErrBackupDestinationKeyRequired) {
+		t.Fatalf("Put with typed-nil sealer error = %v, want %v", err, ErrBackupDestinationKeyRequired)
+	}
+	if n := countRows(t, cs, `SELECT COUNT(*) FROM cloud_backup_destinations`); n != 0 {
+		t.Fatalf("typed-nil sealer Put wrote %d destination rows", n)
+	}
+	if n := countRows(t, cs, `SELECT COUNT(*) FROM cloud_auth_audit_log`); n != 0 {
+		t.Fatalf("typed-nil sealer Put wrote %d audit rows", n)
+	}
+
+	if err := cs.PutBackupDestination(ctx, validDestinationParams(adminID), testBackupSealer(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.OpenBackupDestinationCredentials(ctx, nilSealer); !errors.Is(err, ErrBackupDestinationKeyRequired) {
+		t.Fatalf("Open with typed-nil opener error = %v, want %v", err, ErrBackupDestinationKeyRequired)
+	}
+}
+
+func TestNormalizeBackupEndpointRejectsPortWithoutHost(t *testing.T) {
+	for _, raw := range []string{"https://:443", "http://:9000", "https://:"} {
+		if got, reason := normalizeBackupEndpoint(raw); reason == "" {
+			t.Fatalf("normalizeBackupEndpoint(%q) = %q, want rejection", raw, got)
+		}
+	}
+	if got, reason := normalizeBackupEndpoint("https://acct.r2.cloudflarestorage.com:443"); reason != "" || got != "https://acct.r2.cloudflarestorage.com:443" {
+		t.Fatalf("valid endpoint with port rejected: %q %q", got, reason)
+	}
+}
+
+func TestBackupDestinationCredentialsFormatRedactsCredentials(t *testing.T) {
+	creds := BackupDestinationCredentials{
+		Endpoint: "https://acct.r2.cloudflarestorage.com", Region: "auto", Bucket: "engram-backups", Prefix: "prod/",
+		AccessKeyID: testDestinationAccessKeyID, SecretAccessKey: testDestinationSecret,
+	}
+	type wrapper struct{ Creds BackupDestinationCredentials }
+	for name, value := range map[string]any{"value": creds, "pointer": &creds, "nested": wrapper{Creds: creds}} {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q"} {
+			text := fmt.Sprintf(verb, value)
+			if strings.Contains(text, testDestinationSecret) || strings.Contains(text, testDestinationAccessKeyID) {
+				t.Fatalf("%s formatted with %s leaks credentials: %s", name, verb, text)
+			}
+		}
+	}
+}
+
+func TestPutBackupDestinationParamsJSONOmitsCredentials(t *testing.T) {
+	params := PutBackupDestinationParams{
+		Endpoint: "https://acct.r2.cloudflarestorage.com", Region: "auto", Bucket: "engram-backups", Prefix: "prod/",
+		AccessKeyID: testDestinationAccessKeyID, SecretAccessKey: testDestinationSecret,
+	}
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if text := string(encoded); strings.Contains(text, testDestinationSecret) || strings.Contains(text, testDestinationAccessKeyID) {
+		t.Fatalf("params JSON leaks credentials: %s", text)
+	}
+}
+
+func TestOpenBackupDestinationCredentialsRequiresOpener(t *testing.T) {
+	cs := openIsolatedCloudStore(t)
+	if _, err := cs.OpenBackupDestinationCredentials(context.Background(), nil); !errors.Is(err, ErrBackupDestinationKeyRequired) {
+		t.Fatalf("Open without opener error = %v, want %v", err, ErrBackupDestinationKeyRequired)
 	}
 }

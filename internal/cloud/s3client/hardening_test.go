@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -512,5 +513,24 @@ func TestEndpointRejectionTableMakesNoNetworkCalls(t *testing.T) {
 	}
 	if n := rt.n.Load(); n != 0 {
 		t.Fatalf("endpoint validation made %d network calls", n)
+	}
+}
+
+// json.Marshal of a Config never includes either credential.
+func TestConfigJSONOmitsCredentials(t *testing.T) {
+	cfg := Config{Endpoint: "https://r2.example.com", Region: "auto", Bucket: testBucket, AccessKeyID: testAccessKey, SecretAccessKey: testSecret}
+	type wrapper struct{ Cfg Config }
+	for name, value := range map[string]any{"value": cfg, "pointer": &cfg, "nested": wrapper{Cfg: cfg}} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("%s: json.Marshal: %v", name, err)
+		}
+		text := string(encoded)
+		if strings.Contains(text, testSecret) || strings.Contains(text, testAccessKey) {
+			t.Fatalf("%s: json.Marshal leaked a credential: %s", name, text)
+		}
+		if !strings.Contains(text, testBucket) {
+			t.Fatalf("%s: json.Marshal dropped the non-secret fields: %s", name, text)
+		}
 	}
 }
