@@ -605,7 +605,7 @@ func ageAll(t *testing.T, r *Runner, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-r.exportTimeout - r.uploadDeadline(s3client.MaxObjectSize) - time.Minute)
+	old := r.clock.Now().Add(-r.exportTimeout - r.uploadDeadline(s3client.MaxObjectSize) - time.Minute)
 	for _, e := range entries {
 		if e.Type()&os.ModeSymlink != 0 {
 			continue

@@ -150,7 +150,7 @@ func TestStartSweepKeepsEntriesYoungerThanTheLongestRun(t *testing.T) {
 	if longest != 2*time.Hour+UploadDeadline(s3client.MaxObjectSize) {
 		t.Fatalf("longest run = %s, want the export timeout plus the maximum upload deadline", longest)
 	}
-	now := time.Now()
+	now := h.clock.Now()
 	ages := map[string]time.Duration{
 		"engram-cloud-backup-upload-fresh.tar.gz":  0,
 		"engram-cloud-backup-upload-recent.tar.gz": longest - time.Minute,

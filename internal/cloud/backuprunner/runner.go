@@ -11,9 +11,10 @@
 // uploads it; a server busy with another run leaves the slot to the others
 // and, once idle, records it as skipped if none of them ran it. A run that
 // stays "running" past the stale threshold belongs to a server that stopped
-// mid-run and is marked interrupted. When it starts, the runner removes the
-// upload temp files and export spool directories that a killed server left
-// in its temp directory, once they are older than the longest possible run.
+// mid-run and is marked interrupted. When it starts and then every
+// sweepInterval while it is idle, the runner removes the upload temp files
+// and export spool directories that a killed server left in its temp
+// directory, once they are older than the longest possible run.
 // After a shutdown, recording a run's start and result shares a budget of a
 // few seconds, so the process exits within a container's stop grace period.
 package backuprunner
@@ -74,14 +75,18 @@ const (
 	// finishBackoff is the default wait before the second attempt to
 	// record a result; the third waits twice as long.
 	finishBackoff = time.Second
+	// sweepInterval is how often the scheduler loop repeats the startup
+	// sweep, so the leftovers of a server killed and restarted at once are
+	// removed once they are old enough, not at some later restart.
+	sweepInterval = time.Hour
 
 	// uploadTempPattern names the archive temp file of a run. It differs
 	// from the name of an archive downloaded from the dashboard
-	// (engram-cloud-backup-<time>.tar.gz), so the startup sweep, which
-	// removes regular files matching it, never touches a download.
+	// (engram-cloud-backup-<time>.tar.gz), so the sweep, which removes
+	// regular files matching it, never touches a download.
 	uploadTempPattern = "engram-cloud-backup-upload-*.tar.gz"
 	// exportSpoolPattern names the spool directory of cloudbackup.Export;
-	// the startup sweep removes directories matching it.
+	// the sweep removes directories matching it.
 	exportSpoolPattern = cloudbackup.ExportSpoolPattern
 )
 
@@ -168,8 +173,8 @@ type Runner struct {
 	// finishBackoff is the wait before the second attempt to record a
 	// result; each later attempt waits twice as long.
 	finishBackoff time.Duration
-	// sweepAge is the age after which the startup sweep treats an upload
-	// temp file or export spool directory as abandoned: the longest run.
+	// sweepAge is the age after which the sweep treats an upload temp file
+	// or export spool directory as abandoned: the longest run.
 	sweepAge time.Duration
 	// drain survives the shutdown by shutdownBudget; store writes that must
 	// outlive a shutdown (claim, result) derive from it. Set by Start.
@@ -257,7 +262,8 @@ func newS3Uploader(creds cloudstore.BackupDestinationCredentials) (Uploader, err
 	})
 }
 
-// Start removes stale archive temp files, then launches the scheduler loop.
+// Start removes stale archive temp files, then launches the scheduler loop,
+// which removes them again every sweepInterval while no run is in progress.
 // Cancel ctx to stop it, then call Wait; a run in progress is canceled and
 // recorded as such. Start runs once.
 func (r *Runner) Start(ctx context.Context) {
@@ -330,17 +336,21 @@ func (r *Runner) StartManualBackup(ctx context.Context, actorPrincipalID string)
 // before the schedule was changed are not caught up. A slot whose schedule
 // could not be read or whose claim failed is tried again at the next poll.
 // A slot that arrived while this server was busy is recorded as skipped at
-// the first poll after it became idle, unless another server ran it.
+// the first poll after it became idle, unless another server ran it. The
+// stale archive sweep is repeated at the first poll at least sweepInterval
+// after the previous one at which no run is in progress.
 func (r *Runner) loop(ctx context.Context) {
 	defer r.wg.Done()
 	r.expireStale(ctx)
 	checked := r.clock.Now()
+	swept := checked // Start swept just before the loop began
 	var busySlots []time.Time
 	// failedSlot is the slot whose last claim failed: its retry may find
 	// the row of that claim if the claim committed but its reply was lost.
 	var failedSlot time.Time
 	for ctx.Err() == nil {
 		wait := r.poll
+		swept = r.sweepIfDue(swept)
 		busySlots = r.recordBusySlots(ctx, busySlots)
 		schedule, err := r.store.GetBackupSchedule(ctx)
 		now := r.clock.Now()
@@ -466,6 +476,21 @@ func (r *Runner) claim(params cloudstore.StartBackupRunParams) (cloudstore.Backu
 	return r.store.StartBackupRun(claimCtx, params)
 }
 
+// sweepIfDue repeats the stale archive sweep when sweepInterval has passed
+// since the last one and returns when the last sweep ran. It
+// never sweeps while this server runs a backup, so the upload temp file and
+// export spool directory of that run are never removed; a run that starts
+// during the sweep creates entries far younger than the age bound, which
+// the sweep keeps.
+func (r *Runner) sweepIfDue(last time.Time) time.Time {
+	now := r.clock.Now()
+	if now.Sub(last) < sweepInterval || r.busy.Load() {
+		return last
+	}
+	r.sweepStaleArchives()
+	return now
+}
+
 // sweepStaleArchives removes what a server of this user left in the temp
 // directory when it was killed (SIGKILL, out of memory) before its own
 // cleanup ran: regular files named like an upload temp file and
@@ -480,6 +505,7 @@ func (r *Runner) sweepStaleArchives() {
 		r.logf("[engram-cloud] backup runner: sweep stale archive temp files: %v", err)
 		return
 	}
+	now := r.clock.Now()
 	files, dirs := 0, 0
 	for _, entry := range entries {
 		name := entry.Name()
@@ -489,7 +515,7 @@ func (r *Runner) sweepStaleArchives() {
 			continue
 		}
 		info, err := os.Lstat(filepath.Join(r.tempDir, name)) // a symlink is never followed
-		if err != nil || !ownedByCurrentUser(info) || time.Since(info.ModTime()) <= r.sweepAge {
+		if err != nil || !ownedByCurrentUser(info) || now.Sub(info.ModTime()) <= r.sweepAge {
 			continue
 		}
 		path := filepath.Join(r.tempDir, name)
