@@ -17,6 +17,11 @@ import (
 
 const (
 	authAuditOutcomeSuccess = "success"
+	// authAuditOutcomeStarted marks an attempt whose result is recorded by a
+	// later completion event; authAuditOutcomeFailure is that result when the
+	// attempted operation did not finish.
+	authAuditOutcomeStarted = "started"
+	authAuditOutcomeFailure = "failure"
 
 	authAuditActionUserCreate  = "user.create"
 	authAuditActionUserEnable  = "user.enable"
@@ -26,7 +31,8 @@ const (
 	authAuditActionGrantCreate = "grant.create"
 	authAuditActionGrantRevoke = "grant.revoke"
 
-	authAuditActionBackupDownload = "backup.download"
+	authAuditActionBackupDownload         = "backup.download"
+	authAuditActionBackupDownloadComplete = "backup.download.complete"
 )
 
 // AdminIdentityStore is the storage boundary used by cloudserver admin API

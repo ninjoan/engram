@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudbackup"
 )
 
@@ -25,14 +26,27 @@ type BackupSource interface {
 
 const backupFilenameTimeLayout = "20060102T150405Z"
 
+// Reason codes of a failed backup.download.complete audit event.
+const (
+	backupDownloadReasonExportFailed   = "export_failed"
+	backupDownloadReasonStreamAborted  = "stream_aborted"
+	backupDownloadReasonClientCanceled = "client_canceled"
+)
+
 func backupArchiveFilename(now time.Time) string {
 	return "engram-cloud-backup-" + now.UTC().Format(backupFilenameTimeLayout) + ".tar.gz"
 }
 
+// backupDownloadCompletionAuditTimeout bounds the completion audit insert,
+// which runs detached from the (possibly canceled) request context.
+const backupDownloadCompletionAuditTimeout = 10 * time.Second
+
 // handleDashboardBackupDownload handles POST /dashboard/admin/backups/download.
-// The backup.download audit row is committed before any archive byte is
-// produced; if the audit fails, nothing is exported. The archive streams on
-// the request context, so a client disconnect cancels the export.
+// A backup.download audit row with outcome "started" is committed before any
+// archive byte is produced; if it fails, nothing is exported. After the export
+// a backup.download.complete row records the result: "success" with the bytes
+// written, or "failure" with a reason code. The archive streams on the
+// request context, so a client disconnect cancels the export.
 func (s *CloudServer) handleDashboardBackupDownload(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireManagedAdmin(w, r)
 	if !ok {
@@ -59,26 +73,65 @@ func (s *CloudServer) handleDashboardBackupDownload(w http.ResponseWriter, r *ht
 		return
 	}
 	filename := backupArchiveFilename(time.Now())
-	if err := s.recordAdminAudit(r.Context(), store, actor, authAuditActionBackupDownload, "", "", map[string]any{"filename": filename}); err != nil {
-		http.Error(w, "record audit: "+err.Error(), http.StatusInternalServerError)
+	started := adminAuditEvent(actor, authAuditActionBackupDownload, "", "", map[string]any{"filename": filename})
+	started.Outcome = authAuditOutcomeStarted
+	if err := store.InsertAuthAuditEvent(r.Context(), started); err != nil {
+		log.Printf("[engram-cloud] backup download audit failed: actor=%q: %v", actor.ID, err)
+		http.Error(w, "record audit failed", http.StatusInternalServerError)
 		return
 	}
 	out := &backupDownloadWriter{w: w, filename: filename}
-	if err := export(r.Context(), out); err != nil {
-		if !out.started {
-			log.Printf("[engram-cloud] backup download failed before streaming: actor=%q: %v", actor.ID, err)
-			http.Error(w, "export backup failed", http.StatusInternalServerError)
-			return
-		}
-		// Headers and part of the archive are already on the wire: abort the
-		// connection so the client sees a truncated transfer, never success.
-		log.Printf("[engram-cloud] backup download aborted mid-stream: actor=%q: %v", actor.ID, err)
-		panic(http.ErrAbortHandler)
+	exportErr := export(r.Context(), out)
+	reason := backupDownloadFailureReason(r.Context(), exportErr, out.started)
+	if exportErr == nil && !out.started {
+		// Even an empty export answers with the attachment headers, so a
+		// success response always looks like a download.
+		out.writeHeaders()
+	}
+	s.recordBackupDownloadCompletion(r.Context(), store, actor, filename, out.written, reason)
+	if exportErr == nil {
+		return
 	}
 	if !out.started {
-		// A successful export always writes an archive; guard anyway so a
-		// success response always carries the attachment headers.
-		out.writeHeaders()
+		log.Printf("[engram-cloud] backup download failed before streaming: actor=%q: %v", actor.ID, exportErr)
+		http.Error(w, "export backup failed", http.StatusInternalServerError)
+		return
+	}
+	// Headers and part of the archive are already on the wire: abort the
+	// connection so the client sees a truncated transfer, never success.
+	log.Printf("[engram-cloud] backup download aborted mid-stream: actor=%q: %v", actor.ID, exportErr)
+	panic(http.ErrAbortHandler)
+}
+
+// backupDownloadFailureReason classifies the export result. A canceled
+// request is a client cancel even when the exporter reported no error, since
+// the archive may not have reached the client. "" means success.
+func backupDownloadFailureReason(ctx context.Context, exportErr error, started bool) string {
+	switch {
+	case ctx.Err() != nil:
+		return backupDownloadReasonClientCanceled
+	case exportErr == nil:
+		return ""
+	case !started:
+		return backupDownloadReasonExportFailed
+	default:
+		return backupDownloadReasonStreamAborted
+	}
+}
+
+// recordBackupDownloadCompletion appends the backup.download.complete row.
+// It runs after the response is decided, so a failure is logged, never
+// surfaced. The metadata carries no error text, which could leak internals.
+func (s *CloudServer) recordBackupDownloadCompletion(ctx context.Context, store AdminIdentityStore, actor cloudauth.Principal, filename string, written int64, reason string) {
+	event := adminAuditEvent(actor, authAuditActionBackupDownloadComplete, "", "", map[string]any{"filename": filename, "bytes": written})
+	if reason != "" {
+		event.Outcome = authAuditOutcomeFailure
+		event.ReasonCode = reason
+	}
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backupDownloadCompletionAuditTimeout)
+	defer cancel()
+	if err := store.InsertAuthAuditEvent(auditCtx, event); err != nil {
+		log.Printf("[engram-cloud] backup download completion audit failed: actor=%q outcome=%s reason=%s: %v", actor.ID, event.Outcome, reason, err)
 	}
 }
 
@@ -96,6 +149,7 @@ type backupDownloadWriter struct {
 	w        http.ResponseWriter
 	filename string
 	started  bool
+	written  int64
 }
 
 func (b *backupDownloadWriter) writeHeaders() {
@@ -111,5 +165,7 @@ func (b *backupDownloadWriter) Write(p []byte) (int, error) {
 	if !b.started {
 		b.writeHeaders()
 	}
-	return b.w.Write(p)
+	n, err := b.w.Write(p)
+	b.written += int64(n)
+	return n, err
 }
