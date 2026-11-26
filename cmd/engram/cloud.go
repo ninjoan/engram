@@ -1166,27 +1166,50 @@ func cmdCloudServe() {
 
 var listenCloudDuringStartup = net.Listen
 
+// runCloudServe serves until the listener fails or the process receives
+// SIGINT or SIGTERM. A signal closes the listener, so the runtime runs its
+// shutdown path (a backup in progress is canceled, recorded and its temp
+// file removed) and runCloudServe returns nil. A second signal during that
+// shutdown stops the process at once.
 func runCloudServe(cfg cloud.Config) error {
 	// Refuse before binding the port: an invalid backup key must not leave a
 	// server running with scheduled backups silently disabled.
 	if err := cloudServeBackupKeyError(cfg); err != nil {
 		return err
 	}
+	signaled, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	startup, err := cloudserver.ListenDuringStartup(cfg.BindHost, cfg.Port, listenCloudDuringStartup)
 	if err != nil {
 		return err
 	}
 	defer startup.Close()
 	ctx := startup.InitializationContext()
+	go func() {
+		select {
+		case <-signaled.Done():
+			stopSignals() // a second signal terminates the process
+			fmt.Fprintln(os.Stderr, "engram cloud serve: shutting down")
+			startup.Close()
+		case <-ctx.Done():
+		}
+	}()
 	runtime, err := newCloudRuntime(ctx, cfg)
 	if err != nil {
+		if signaled.Err() != nil {
+			return nil
+		}
 		if serveErr := context.Cause(ctx); serveErr != nil {
 			return serveErr
 		}
 		return err
 	}
 	fmt.Printf("Starting Engram cloud server on port %d\n", cfg.Port)
-	return runtime.Start(startup)
+	err = runtime.Start(startup)
+	if signaled.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 func validateCloudServeAuthConfig() error {

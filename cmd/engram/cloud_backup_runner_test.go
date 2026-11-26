@@ -86,6 +86,8 @@ func TestBackupRunnerRuntimeWaitsForTheRunnerBeforeClosingTheStore(t *testing.T)
 	cs, dsn := openCloudBackupRunnerStore(t)
 	cfg := backupKeyConfigFromEnv(t, cloudBackupRunnerTestKey)
 	cfg.BindHost, cfg.Port = "127.0.0.1", 0
+	// The runner sweeps stale archives from the temp dir: keep it private.
+	t.Setenv("TMPDIR", t.TempDir())
 
 	putReceived := make(chan struct{})
 	var once sync.Once
