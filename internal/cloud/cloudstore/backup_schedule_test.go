@@ -255,6 +255,25 @@ func TestBackupScheduleNextRunAcrossDaylightSavingTransitions(t *testing.T) {
 		t.Fatalf("run after spring-forward = %s, %v; want 2026-03-09 02:30 EDT", next.In(ny), ok)
 	}
 
+	// Europe/Berlin is ahead of UTC: 2026-03-29 02:30 does not exist there
+	// (clocks jump 02:00 CET -> 03:00 CEST). The run happens at the jump
+	// (01:00 UTC), neither an hour early nor lost, and the next run is back
+	// at 02:30 local time.
+	berlin := mustLocation(t, "Europe/Berlin")
+	berlinDaily := BackupSchedule{Enabled: true, Weekdays: []time.Weekday{time.Sunday, time.Monday}, TimeOfDay: "02:30", Timezone: "Europe/Berlin"}
+	berlinGap, ok := berlinDaily.NextRun(time.Date(2026, 3, 29, 0, 0, 0, 0, berlin))
+	if !ok || !berlinGap.Equal(time.Date(2026, 3, 29, 1, 0, 0, 0, time.UTC)) {
+		t.Fatalf("Berlin spring-forward run = %s (%s UTC), %v; want 2026-03-29 03:00 CEST, the instant the clocks jump", berlinGap.In(berlin), berlinGap.UTC(), ok)
+	}
+	berlinNext, ok := berlinDaily.NextRun(berlinGap)
+	if !ok || !berlinNext.Equal(time.Date(2026, 3, 30, 2, 30, 0, 0, berlin)) {
+		t.Fatalf("Berlin run after spring-forward = %s, %v; want 2026-03-30 02:30 CEST", berlinNext.In(berlin), ok)
+	}
+	// Asked just before the jump, the run is still the jump itself.
+	if got, ok := berlinDaily.NextRun(time.Date(2026, 3, 29, 0, 59, 0, 0, time.UTC)); !ok || !got.Equal(berlinGap) {
+		t.Fatalf("Berlin NextRun one minute before the jump = %s, %v; want %s", got.UTC(), ok, berlinGap.UTC())
+	}
+
 	// 2026-11-01 01:30 happens twice in New York; the run must happen once.
 	fallBack := BackupSchedule{Enabled: true, Weekdays: []time.Weekday{time.Sunday, time.Monday}, TimeOfDay: "01:30", Timezone: "America/New_York"}
 	first, ok := fallBack.NextRun(time.Date(2026, 11, 1, 0, 0, 0, 0, ny))

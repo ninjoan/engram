@@ -38,6 +38,16 @@ const (
 	backupRunTruncated         = "..."
 	backupRunDefaultFailure    = "backup failed"
 	minBackupRunRedactLength   = 4
+
+	// BackupRunInterruptedMessage is the error of a run that stayed
+	// "running" past the stale threshold, so its server stopped (or lost its
+	// database connection) before it could record the result.
+	BackupRunInterruptedMessage = "interrupted (server stopped before completion)"
+
+	// backupRunStartLock serializes run starts across servers (a
+	// transaction-scoped PostgreSQL advisory lock), so RefuseIfRunning sees
+	// every start that committed before it.
+	backupRunStartLock int64 = 0x656e6772616d4231 // "engramB1"
 )
 
 var (
@@ -48,6 +58,9 @@ var (
 	// ErrBackupRunAlreadyRecorded reports a second start for the same
 	// scheduled slot, so two servers never both run it.
 	ErrBackupRunAlreadyRecorded = errors.New("cloudstore: scheduled backup run is already recorded")
+	// ErrBackupRunInProgress reports a start with RefuseIfRunning while
+	// another run is running.
+	ErrBackupRunInProgress = errors.New("cloudstore: another backup run is running")
 )
 
 // BackupRun is one history row. ScheduledFor is zero for a manual run and
@@ -68,10 +81,14 @@ type BackupRun struct {
 
 // StartBackupRunParams starts a run. A scheduled run names its slot; a
 // manual run names no slot and usually the principal that requested it.
+// RefuseIfRunning refuses the start with ErrBackupRunInProgress while any
+// run is still running (on any server); expire stale runs first with
+// ExpireStaleBackupRuns so an interrupted run does not block forever.
 type StartBackupRunParams struct {
 	Trigger          string
 	ScheduledFor     time.Time
 	ActorPrincipalID string
+	RefuseIfRunning  bool
 }
 
 // FinishBackupRunParams finishes a running run. A success names the object
@@ -89,7 +106,9 @@ type FinishBackupRunParams struct {
 
 const backupRunColumns = `id, trigger, scheduled_for, started_at, finished_at, status, object_key, size_bytes, error_message, COALESCE(actor_principal_id::text, '')`
 
-// StartBackupRun records a running run and returns it.
+// StartBackupRun records a running run and returns it. Starts are serialized
+// by an advisory lock; a scheduled slot already recorded (by any server)
+// fails with ErrBackupRunAlreadyRecorded.
 func (cs *CloudStore) StartBackupRun(ctx context.Context, params StartBackupRunParams) (BackupRun, error) {
 	if cs == nil || cs.db == nil {
 		return BackupRun{}, fmt.Errorf("cloudstore: not initialized")
@@ -108,7 +127,24 @@ func (cs *CloudStore) StartBackupRun(ctx context.Context, params StartBackupRunP
 	default:
 		return BackupRun{}, fmt.Errorf("%w: trigger must be %q or %q", ErrInvalidBackupRun, BackupRunTriggerScheduled, BackupRunTriggerManual)
 	}
-	row := cs.db.QueryRowContext(ctx, `
+	tx, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return BackupRun{}, fmt.Errorf("cloudstore: begin backup run tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, backupRunStartLock); err != nil {
+		return BackupRun{}, fmt.Errorf("cloudstore: lock backup run start: %w", err)
+	}
+	if params.RefuseIfRunning {
+		var running bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cloud_backup_runs WHERE status = 'running')`).Scan(&running); err != nil {
+			return BackupRun{}, fmt.Errorf("cloudstore: check running backup runs: %w", err)
+		}
+		if running {
+			return BackupRun{}, ErrBackupRunInProgress
+		}
+	}
+	row := tx.QueryRowContext(ctx, `
 		INSERT INTO cloud_backup_runs (trigger, scheduled_for, status, actor_principal_id)
 		VALUES ($1, $2, 'running', $3)
 		ON CONFLICT (scheduled_for) WHERE trigger = 'scheduled' DO NOTHING
@@ -121,7 +157,37 @@ func (cs *CloudStore) StartBackupRun(ctx context.Context, params StartBackupRunP
 	if err != nil {
 		return BackupRun{}, fmt.Errorf("cloudstore: start backup run: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		return BackupRun{}, fmt.Errorf("cloudstore: commit backup run start: %w", err)
+	}
 	return run, nil
+}
+
+// ExpireStaleBackupRuns finishes every run that is still "running" although
+// it started more than olderThan ago (by the database clock) as a failure
+// with BackupRunInterruptedMessage, and returns how many it finished. A run
+// is bounded well below the threshold the runner uses, so such a row belongs
+// to a server that stopped mid-run.
+func (cs *CloudStore) ExpireStaleBackupRuns(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if cs == nil || cs.db == nil {
+		return 0, fmt.Errorf("cloudstore: not initialized")
+	}
+	if olderThan <= 0 {
+		return 0, fmt.Errorf("%w: the stale threshold must be positive", ErrInvalidBackupRun)
+	}
+	result, err := cs.db.ExecContext(ctx, `
+		UPDATE cloud_backup_runs
+		SET status = 'failure', finished_at = NOW(), error_message = $2
+		WHERE status = 'running' AND started_at < NOW() - make_interval(secs => $1)`,
+		olderThan.Seconds(), BackupRunInterruptedMessage)
+	if err != nil {
+		return 0, fmt.Errorf("cloudstore: expire stale backup runs: %w", err)
+	}
+	expired, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("cloudstore: expire stale backup runs: %w", err)
+	}
+	return expired, nil
 }
 
 // FinishBackupRun moves a running run to success or failure and returns it.
@@ -218,12 +284,19 @@ func scanBackupRun(row backupRunScanner) (BackupRun, error) {
 var (
 	backupRunURLUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]+@`)
 	backupRunBearer      = regexp.MustCompile(`(?i)\b(bearer)\s+[^\s,;]+`)
-	backupRunSecretPair  = regexp.MustCompile(`(?i)\b(x-amz-signature|x-amz-credential|x-amz-security-token|signature|credential|authorization|password|passwd|secret[_-]?access[_-]?key|access[_-]?key[_-]?id|secret|token)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	// backupRunXMLSecret matches S3 error-body elements that echo
+	// credentials or signing material, such as <AWSAccessKeyId>,
+	// <SignatureProvided> and <StringToSign>. The value runs to the next tag
+	// or to the end of a truncated message.
+	backupRunXMLSecret  = regexp.MustCompile(`(?i)(<(?:AWSAccessKeyId|SignatureProvided|StringToSign|StringToSignBytes|CanonicalRequest|CanonicalRequestBytes|Credential|X-Amz-Credential|X-Amz-Signature|SecretAccessKey|SessionToken|SecurityToken)(?:\s[^>]*)?>)[^<]*`)
+	backupRunSecretPair = regexp.MustCompile(`(?i)\b(x-amz-signature|x-amz-credential|x-amz-security-token|signature|credential|authorization|password|passwd|secret[_-]?access[_-]?key|access[_-]?key[_-]?id|secret|token)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)`)
 )
 
 // SanitizeBackupRunError makes an error message safe to store and display:
 // it scrubs every value in secrets (of at least four bytes), URL userinfo,
-// bearer tokens and credential-like key=value pairs, replaces control
+// bearer tokens, credential-like key=value pairs and S3 XML elements that
+// echo credentials or signing material (<AWSAccessKeyId>,
+// <SignatureProvided>, <StringToSign>, <CanonicalRequest>...), replaces control
 // characters and invalid UTF-8, collapses whitespace, and bounds the result
 // to MaxBackupRunErrorMessageBytes, marking a truncation with "...".
 func SanitizeBackupRunError(message string, secrets ...string) string {
@@ -234,6 +307,7 @@ func SanitizeBackupRunError(message string, secrets ...string) string {
 		}
 	}
 	message = backupRunURLUserinfo.ReplaceAllString(message, "${1}"+backupRunRedacted+"@")
+	message = backupRunXMLSecret.ReplaceAllString(message, "${1}"+backupRunRedacted)
 	message = backupRunBearer.ReplaceAllString(message, "${1} "+backupRunRedacted)
 	message = backupRunSecretPair.ReplaceAllString(message, "${1}${2}"+backupRunRedacted)
 	message = strings.Map(func(r rune) rune {
