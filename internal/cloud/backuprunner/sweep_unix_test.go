@@ -27,6 +27,7 @@ func TestStartSweepRemovesHardLinkNamesAndKeepsFIFOs(t *testing.T) {
 	if err := syscall.Mkfifo(fifoDir, 0o600); err != nil {
 		t.Fatalf("mkfifo: %v", err)
 	}
+	ageAll(t, h.runner, h.tempDir)
 
 	h.start(t)
 	h.clock.waitSleeping(t)

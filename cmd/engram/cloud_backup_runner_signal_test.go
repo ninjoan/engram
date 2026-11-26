@@ -38,7 +38,19 @@ const (
 	signalHelperRuntimeStarted = "SIGNAL HELPER: runtime started"
 	signalHelperManualStarted  = "SIGNAL HELPER: manual backup started"
 	signalHelperServeReturned  = "SIGNAL HELPER: runCloudServe returned nil"
+	signalHelperStartFailure   = "SIGNAL HELPER: flushing the runtime failed"
+	signalHelperInitFailure    = "SIGNAL HELPER: initializing the runtime failed"
 )
+
+// signalFailingRuntime serves until the startup listener stops, then fails
+// for a reason unrelated to the shutdown.
+type signalFailingRuntime struct{}
+
+func (signalFailingRuntime) Start(startup *cloudserver.StartupListener) error {
+	fmt.Println(signalHelperRuntimeStarted)
+	<-startup.InitializationContext().Done()
+	return errors.New(signalHelperStartFailure)
+}
 
 // signalProbeRuntime serves until the startup listener stops, then leaves a
 // marker so the parent can tell the shutdown path ran.
@@ -67,6 +79,19 @@ func TestBackupRunnerSignalHelperProcess(t *testing.T) {
 	case "probe":
 		newCloudRuntime = func(context.Context, cloud.Config) (cloudServerRuntime, error) {
 			return signalProbeRuntime{marker: os.Getenv(signalHelperMarkerEnv)}, nil
+		}
+	case "start-error":
+		newCloudRuntime = func(context.Context, cloud.Config) (cloudServerRuntime, error) {
+			return signalFailingRuntime{}, nil
+		}
+	case "init-error", "init-canceled":
+		newCloudRuntime = func(ctx context.Context, _ cloud.Config) (cloudServerRuntime, error) {
+			fmt.Println(signalHelperRuntimeStarted)
+			<-ctx.Done()
+			if mode == "init-canceled" {
+				return nil, fmt.Errorf("open store: %w", ctx.Err())
+			}
+			return nil, errors.New(signalHelperInitFailure)
 		}
 	case "backup":
 		newCloudRuntime = func(_ context.Context, cfg cloud.Config) (cloudServerRuntime, error) {
@@ -264,4 +289,44 @@ func TestCloudServeSignalTermCancelsTheRunningBackupAndRemovesItsTempFile(t *tes
 	if out := h.output.String(); strings.Contains(out, "cmd-signal-secret") || strings.Contains(out, "AKIACMDSIGNAL0001") {
 		t.Fatalf("server output leaks a credential:\n%s", out)
 	}
+}
+
+// A signal does not hide a failure unrelated to the shutdown: the runtime
+// or its initialization failing for another reason exits with that error.
+func TestCloudServeSignalDoesNotHideAFailureUnrelatedToTheShutdown(t *testing.T) {
+	for mode, want := range map[string]string{
+		"start-error": signalHelperStartFailure,
+		"init-error":  signalHelperInitFailure,
+	} {
+		t.Run(mode, func(t *testing.T) {
+			h := startSignalHelper(t, signalHelperModeEnv+"="+mode, "ENGRAM_CLOUD_BACKUP_KEY=")
+			h.waitOutput(t, signalHelperRuntimeStarted, 30*time.Second)
+			if err := h.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				t.Fatalf("signal helper: %v", err)
+			}
+			var err error
+			select {
+			case err = <-h.done:
+				h.done <- err
+			case <-time.After(60 * time.Second):
+				t.Fatalf("helper did not exit; output:\n%s", h.output.String())
+			}
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+				t.Fatalf("helper exit = %v, want a failure; output:\n%s", err, h.output.String())
+			}
+			out := h.output.String()
+			if !strings.Contains(out, "runCloudServe: "+want) || strings.Contains(out, signalHelperServeReturned) {
+				t.Fatalf("output does not report the failure %q:\n%s", want, out)
+			}
+		})
+	}
+}
+
+// Previous behavior: an initialization that ends because of the shutdown
+// still exits with status 0.
+func TestCloudServeSignalDuringInitializationExitsCleanly(t *testing.T) {
+	h := startSignalHelper(t, signalHelperModeEnv+"=init-canceled", "ENGRAM_CLOUD_BACKUP_KEY=")
+	h.waitOutput(t, signalHelperRuntimeStarted, 30*time.Second)
+	h.stop(t, syscall.SIGTERM)
 }

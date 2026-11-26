@@ -303,4 +303,83 @@ func TestBusyRunnerLeavesTheSlotToAFreeRunnerOnPostgres(t *testing.T) {
 	if puts, _, _ := s3.snapshot(); len(puts) != 1 || puts[0] != wantPath {
 		t.Fatalf("scheduled PUTs = %v, want the 03:00 slot once at %s", puts, wantPath)
 	}
+
+	// Once idle, the busy server finds the slot already run and records
+	// nothing more.
+	release <- struct{}{}
+	waitFor(t, "the manual run", func() bool {
+		runs, err := cs.ListBackupRuns(ctx, 10)
+		return err == nil && len(runs) == 2 && runs[1].Status == cloudstore.BackupRunStatusSuccess && !busy.busy.Load()
+	})
+	busyClock.Advance(DefaultPollInterval)
+	waitFor(t, "the busy server to find the slot recorded", func() bool {
+		return strings.Contains(busyLogs.text(), "was run by another server")
+	})
+	busyClock.waitSleeping(t)
+	if after, err := cs.ListBackupRuns(ctx, 10); err != nil || len(after) != 2 || after[0].ID != runs[0].ID || after[0].Status != cloudstore.BackupRunStatusSuccess {
+		t.Fatalf("runs after the busy server became idle = %+v, %v; want the same two runs", after, err)
+	}
+}
+
+// On a single server, a slot that arrives while a manual run is running is
+// recorded as skipped once that run ends.
+func TestBusySlotIsRecordedAsSkippedOnPostgres(t *testing.T) {
+	cs, _ := openRunnerTestStore(t)
+	ctx := context.Background()
+	manualPut := make(chan struct{})
+	release := make(chan struct{})
+	var manualOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		manualOnce.Do(func() { close(manualPut) })
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	sealer := storeTestDestination(t, cs, srv.URL)
+	if err := cs.PutBackupSchedule(ctx, cloudstore.PutBackupScheduleParams{Enabled: true, Weekdays: []time.Weekday{time.Monday}, TimeOfDay: "03:00", Timezone: "UTC", Actor: cloudstore.BackupDestinationActor{Source: "test"}}); err != nil {
+		t.Fatalf("PutBackupSchedule: %v", err)
+	}
+	clock, logs := newFakeClock(beforeSlot), &logSink{}
+	runner, err := New(Config{Store: cs, Key: sealer, Clock: clock, TempDir: t.TempDir(), Logf: logs.Logf, EngramVersion: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	runner.Start(runCtx)
+	t.Cleanup(func() { cancel(); waitDone(t, "runner shutdown", runner.Wait) })
+	clock.waitSleeping(t)
+	if _, err := runner.StartManualBackup(ctx, ""); err != nil {
+		t.Fatalf("manual run: %v", err)
+	}
+	select {
+	case <-manualPut:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the manual upload never reached the destination")
+	}
+	clock.Advance(time.Minute)
+	waitFor(t, "the busy server to pass the slot", func() bool {
+		return strings.Contains(logs.text(), "not claimed: this server is still running another backup")
+	})
+	clock.waitSleeping(t)
+	release <- struct{}{}
+	waitFor(t, "the manual run", func() bool {
+		runs, err := cs.ListBackupRuns(ctx, 10)
+		return err == nil && len(runs) == 1 && runs[0].Status == cloudstore.BackupRunStatusSuccess && !runner.busy.Load()
+	})
+	clock.Advance(DefaultPollInterval)
+	waitFor(t, "the skipped slot", func() bool {
+		runs, err := cs.ListBackupRuns(ctx, 10)
+		return err == nil && len(runs) == 2 && runs[0].Status != cloudstore.BackupRunStatusRunning
+	})
+	runs, err := cs.ListBackupRuns(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run := runs[0]; run.Trigger != cloudstore.BackupRunTriggerScheduled || !run.ScheduledFor.Equal(slot) || run.Status != cloudstore.BackupRunStatusFailure || run.ErrorMessage != "skipped: another backup was still running" {
+		t.Fatalf("slot run = %+v, want it skipped because another backup was still running", run)
+	}
 }

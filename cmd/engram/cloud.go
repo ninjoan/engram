@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -1168,9 +1170,10 @@ var listenCloudDuringStartup = net.Listen
 
 // runCloudServe serves until the listener fails or the process receives
 // SIGINT or SIGTERM. A signal closes the listener, so the runtime runs its
-// shutdown path (a backup in progress is canceled, recorded and its temp
-// file removed) and runCloudServe returns nil. A second signal during that
-// shutdown stops the process at once.
+// shutdown path (a backup in progress is canceled, its temp file removed
+// and its result recorded) and runCloudServe returns nil, unless the
+// runtime or its initialization failed for a reason other than the
+// shutdown. A second signal during that shutdown stops the process at once.
 func runCloudServe(cfg cloud.Config) error {
 	// Refuse before binding the port: an invalid backup key must not leave a
 	// server running with scheduled backups silently disabled.
@@ -1197,7 +1200,10 @@ func runCloudServe(cfg cloud.Config) error {
 	runtime, err := newCloudRuntime(ctx, cfg)
 	if err != nil {
 		if signaled.Err() != nil {
-			return nil
+			if isCloudServeShutdownError(ctx, err) {
+				return nil
+			}
+			return err
 		}
 		if serveErr := context.Cause(ctx); serveErr != nil {
 			return serveErr
@@ -1206,10 +1212,20 @@ func runCloudServe(cfg cloud.Config) error {
 	}
 	fmt.Printf("Starting Engram cloud server on port %d\n", cfg.Port)
 	err = runtime.Start(startup)
-	if signaled.Err() != nil {
+	if signaled.Err() != nil && isCloudServeShutdownError(ctx, err) {
 		return nil
 	}
 	return err
+}
+
+// isCloudServeShutdownError reports whether err is nil or was caused by the
+// shutdown that ended ctx (the closed listener or the canceled context).
+func isCloudServeShutdownError(ctx context.Context, err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, http.ErrServerClosed) {
+		return true
+	}
+	cause := context.Cause(ctx)
+	return cause != nil && errors.Is(err, cause)
 }
 
 func validateCloudServeAuthConfig() error {

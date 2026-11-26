@@ -124,6 +124,12 @@ type fakeStore struct {
 	// finishFailures makes FinishBackupRun fail this many times; negative
 	// fails every time.
 	finishFailures int
+	// finishGate runs before FinishBackupRun records anything; an error it
+	// returns is returned without recording, like a database that hangs.
+	finishGate func(ctx context.Context) error
+	// finishLostReplies makes FinishBackupRun record the result and then
+	// fail this many times, like a commit whose reply is lost.
+	finishLostReplies int
 }
 
 var errStoreUnavailable = errors.New("fake store: connection reset by peer")
@@ -222,10 +228,18 @@ func (s *fakeStore) startBackupRun(params cloudstore.StartBackupRunParams) (clou
 	return run, nil
 }
 
-func (s *fakeStore) FinishBackupRun(_ context.Context, params cloudstore.FinishBackupRunParams) (cloudstore.BackupRun, error) {
+func (s *fakeStore) FinishBackupRun(ctx context.Context, params cloudstore.FinishBackupRunParams) (cloudstore.BackupRun, error) {
+	s.mu.Lock()
+	s.calls = append(s.calls, "finish")
+	gate := s.finishGate
+	s.mu.Unlock()
+	if gate != nil {
+		if err := gate(ctx); err != nil {
+			return cloudstore.BackupRun{}, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls = append(s.calls, "finish")
 	if s.finishFailures != 0 {
 		if s.finishFailures > 0 {
 			s.finishFailures--
@@ -247,6 +261,10 @@ func (s *fakeStore) FinishBackupRun(_ context.Context, params cloudstore.FinishB
 		}
 		s.redacts[run.ID] = append([]string(nil), params.Redact...)
 		s.runs[i] = run
+		if s.finishLostReplies > 0 {
+			s.finishLostReplies--
+			return cloudstore.BackupRun{}, errStoreUnavailable
+		}
 		return run, nil
 	}
 	return cloudstore.BackupRun{}, cloudstore.ErrBackupRunNotRunning

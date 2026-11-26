@@ -362,6 +362,18 @@ func TestScheduledSlotWhileBusyIsLeftForAnotherServer(t *testing.T) {
 	if puts := busy.uploader.snapshot(); len(puts) != 1 || !strings.Contains(puts[0].key, "engram-cloud-backup-20261130T025900Z") {
 		t.Fatalf("busy server uploads = %+v, want only the manual run", puts)
 	}
+
+	// Once idle, the busy server finds the slot run by the free server and
+	// records nothing more.
+	waitFor(t, "the busy server to become idle", func() bool { return !busy.runner.busy.Load() })
+	busy.clock.Advance(DefaultPollInterval)
+	waitFor(t, "the busy server to find the slot recorded", func() bool {
+		return strings.Contains(busy.logs.text(), "scheduled backup 2026-11-30T03:00:00Z, which passed while this server was busy, was run by another server")
+	})
+	busy.clock.waitSleeping(t)
+	if runs := busy.store.snapshot(); len(runs) != 2 || runs[1].ID != scheduled.ID || runs[1].Status != cloudstore.BackupRunStatusSuccess {
+		t.Fatalf("runs after the busy server became idle = %+v, want the manual run and the free server's upload", runs)
+	}
 }
 
 func TestUploadFailureIsRecordedWithoutCredentials(t *testing.T) {
@@ -585,6 +597,25 @@ func TestDefaultTempDirIsTheSystemTempDir(t *testing.T) {
 	}
 }
 
+// ageAll makes every entry of dir older than r's longest run, so the
+// startup sweep considers it abandoned.
+func ageAll(t *testing.T, r *Runner, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-r.exportTimeout - r.uploadDeadline(s3client.MaxObjectSize) - time.Minute)
+	for _, e := range entries {
+		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		if err := os.Chtimes(filepath.Join(dir, e.Name()), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func writeTestFile(t *testing.T, path string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte("plaintext archive"), 0o600); err != nil {
@@ -639,6 +670,8 @@ func TestStartRemovesStaleUploadFilesAndExportSpoolDirsOnly(t *testing.T) {
 		"engram-cloud-backup-upload-dangling.tar.gz": filepath.Join(outside, "missing"),
 		"engram-cloud-backup-export-dangling":        filepath.Join(outside, "missing-dir"),
 	}
+	// Everything but the symlinks is older than the longest run.
+	ageAll(t, h.runner, h.tempDir)
 	symlinked := true
 	for name, target := range links {
 		if err := os.Symlink(target, filepath.Join(h.tempDir, name)); err != nil {
