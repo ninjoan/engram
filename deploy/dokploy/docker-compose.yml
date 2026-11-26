@@ -1,10 +1,11 @@
-# Personal staging deployment of Engram Cloud on Dokploy.
+# Personal Engram Cloud deployment on Dokploy (staging and production).
 # Lives only on the fork's personal/main branch; never part of upstream PRs.
 #
 # Dokploy: create a "Compose" service with source GitHub ninjoan/engram,
 # branch personal/main, compose path ./deploy/dokploy/docker-compose.yml.
-# Set every ${VAR} below in the Dokploy "Environment" tab (see .env.example).
+# Set every ${VAR} below in the Dokploy "Environment" tab (see README.md).
 # Attach the domain in Dokploy to service "cloud", container port 18080, HTTPS on.
+# The image is the official prebuilt one; pin ENGRAM_IMAGE to a version tag.
 # PostgreSQL is never published: no ports, only the internal compose network.
 
 services:
@@ -24,11 +25,7 @@ services:
       retries: 10
 
   cloud:
-    build:
-      context: ../..
-      dockerfile: docker/cloud/Dockerfile
-      args:
-        VERSION: ${ENGRAM_BUILD_VERSION:-personal-staging}
+    image: ${ENGRAM_IMAGE:-ghcr.io/gentleman-programming/engram:v3.7.2}
     restart: unless-stopped
     depends_on:
       postgres:
