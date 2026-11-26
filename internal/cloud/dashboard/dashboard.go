@@ -187,6 +187,9 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("GET /dashboard/admin/users", h.requireScopedSession((*handlers).handleAdminUsers))
 	mux.HandleFunc("GET /dashboard/admin/users/list", h.requireScopedSession((*handlers).handleAdminUsersList))
 	mux.HandleFunc("GET /dashboard/admin/health", h.requireScopedSession((*handlers).handleAdminHealth))
+	// The backups page reads no dashboard data; its download POST is owned by
+	// internal/cloud/cloudserver (managed-admin gate + audit).
+	mux.HandleFunc("GET /dashboard/admin/backups", h.requireSession(h.handleAdminBackups))
 	// Sync controls are mutations, not dashboard reads. Keep their established
 	// admin-only store semantics outside request read scoping.
 	mux.HandleFunc("POST /dashboard/admin/projects/{name}/sync", h.requireSession(h.handleAdminSyncTogglePost))
@@ -879,6 +882,23 @@ func (h *handlers) handleAdminUsersList(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	renderComponent(w, r, ManagedUsersListPartial(rows, p.CanManageManagedUsers()))
+}
+
+// handleAdminBackups handles GET /dashboard/admin/backups. Any dashboard admin
+// may view it; the download form renders only for sessions that can pass the
+// managed-admin policy enforced by the cloudserver-owned download route.
+func (h *handlers) handleAdminBackups(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	if !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	component := AdminBackupsPage(p.CanManageManagedUsers(), cloudstore.BackupTables(), cloudstore.BackupExclusions())
+	if isHTMXRequest(r) {
+		renderComponent(w, r, component)
+		return
+	}
+	renderComponent(w, r, Layout("Backups", p.DisplayName(), "admin", p.IsAdmin(), h.cfg.Version, component))
 }
 
 // handleAdminHealth handles GET /dashboard/admin/health.

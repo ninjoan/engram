@@ -719,7 +719,7 @@ templ ContributorDetailPage(contributor *cloudstore.DashboardContributorRow, ses
 // ─── Phase 8: Admin Views ───────────────────────────────────────────────────
 
 // adminNav renders the shared admin sub-navigation bar.
-// active should be one of: "overview", "projects", "users", "health", "audit-log".
+// active should be one of: "overview", "projects", "users", "backups", "health", "audit-log".
 templ adminNav(active string) {
 	<div class="admin-nav">
 		if active == "overview" {
@@ -736,6 +736,11 @@ templ adminNav(active string) {
 			<a href="/dashboard/admin/users" class="active">Managed Users</a>
 		} else {
 			<a href="/dashboard/admin/users">Managed Users</a>
+		}
+		if active == "backups" {
+			<a href="/dashboard/admin/backups" class="active">Backups</a>
+		} else {
+			<a href="/dashboard/admin/backups">Backups</a>
 		}
 		if active == "health" {
 			<a href="/dashboard/admin/health" class="active">System Health</a>
@@ -1163,6 +1168,85 @@ templ ManagedUserTokenCreatedPage(user cloudstore.HumanUser, rawToken string, to
 		</div>
 		<a href={ templ.SafeURL("/dashboard/admin/users/" + url.PathEscape(user.PrincipalID)) }>Back to { user.Username }</a>
 	</section>
+}
+
+// AdminBackupsPage renders the admin Backups surface: what a backup archive
+// contains and excludes, and the on-demand download form. The download POST
+// is owned by internal/cloud/cloudserver, which enforces managed-admin
+// authorization and records the backup.download audit before streaming; this
+// page only renders the form for sessions that hold that capability. There is
+// deliberately no restore control: archives are unsigned, so restore stays an
+// operator-only CLI (engram cloud backup import).
+//
+// The "Scheduled backups" section is reserved for scheduled off-host backups
+// (destination plus weekday/time schedule). It renders no controls until that
+// feature exists: UI controls must map to real business rules.
+templ AdminBackupsPage(canDownload bool, tables []string, exclusions []cloudstore.BackupExclusion) {
+	<section class="frame-section">
+		<div class="section-header">
+			<div>
+				<p class="section-kicker">ADMIN SURFACE</p>
+				<h2>Backups</h2>
+			</div>
+		</div>
+		@adminNav("backups")
+		<div class="data-frame">
+			<p class="section-kicker">DOWNLOAD BACKUP</p>
+			<p>One gzip-compressed tar archive of every project's memories and the Cloud state, read from a single consistent database snapshot. Its <code>backup.json</code> manifest, written last, records each table's row count and SHA-256 checksum.</p>
+			if canDownload {
+				<form method="post" action="/dashboard/admin/backups/download" class="managed-user-form">
+					<button type="submit">Download backup</button>
+				</form>
+				<p class="muted">Every download is recorded in the audit log as <code>backup.download</code> before the archive is sent.</p>
+			}
+		</div>
+		if !canDownload {
+			@BackupDownloadAdministrationNotice()
+		}
+		<div class="data-frame policy-note danger-note">
+			<p><strong>The archive holds plaintext memories.</strong> Observations, prompts, and audit history are stored unencrypted. Treat it like a database dump: restrict who can read it and encrypt it before copying it off this machine.</p>
+		</div>
+		<h3 class="section-block-title">Included</h3>
+		<table class="data-table">
+			<tbody>
+				for _, table := range tables {
+					<tr><td><code>{ table }</code></td></tr>
+				}
+			</tbody>
+		</table>
+		<h3 class="section-block-title">Never included</h3>
+		<table class="data-table">
+			<thead>
+				<tr>
+					<th>Table</th>
+					<th>Column</th>
+					<th>Reason</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, exclusion := range exclusions {
+					<tr>
+						<td><code>{ exclusion.Table }</code></td>
+						<td>{ emptyDash(exclusion.Column) }</td>
+						<td>{ exclusion.Reason }</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+		<p class="muted">Environment secrets such as <code>ENGRAM_CLOUD_TOKEN_PEPPER</code> and <code>ENGRAM_JWT_SECRET</code> are never part of a backup. After a restore every managed token must be re-issued.</p>
+		<h3 class="section-block-title">Restore</h3>
+		<p class="muted">Restoring is operator-only: run <code>engram cloud backup import</code> against a fresh database. The dashboard never restores archives because they are not signed.</p>
+		<h3 class="section-block-title">Scheduled backups</h3>
+		@EmptyState("Not Configured", "Scheduled backups to an external destination are not available yet. Download a backup above or run engram cloud backup export on the server.")
+	</section>
+}
+
+// BackupDownloadAdministrationNotice explains why a dashboard admin session
+// without a managed admin token cannot download a backup.
+templ BackupDownloadAdministrationNotice() {
+	<div class="data-frame policy-note">
+		<p><strong>Backup download requires a managed admin token.</strong> Sign in with a token issued by <code>engram cloud bootstrap admin --issue-token ...</code>, or run <code>engram cloud backup export</code> on the server.</p>
+	</div>
 }
 
 // AdminHealthPage renders the system health detail view.
