@@ -63,6 +63,9 @@ func TestCloudBootstrapRecoverTokenWithoutPrincipalKeepsStrandedAudit(t *testing
 	if store.recoverTokenParams.Principal != "" || store.recoverTokenParams.Name != "cli-bootstrap-recovery" {
 		t.Fatalf("no-flag recovery must not select a principal, got %+v", store.recoverTokenParams)
 	}
+	if len(store.auditEvents) != 1 {
+		t.Fatalf("no-flag recovery audit events = %d, want 1", len(store.auditEvents))
+	}
 	event := store.auditEvents[0]
 	if event.ReasonCode != "stranded_admin_token_recovered" || len(event.Metadata) != 2 || event.Metadata["recovered"] != true {
 		t.Fatalf("no-flag recovery audit changed: %+v", event)
