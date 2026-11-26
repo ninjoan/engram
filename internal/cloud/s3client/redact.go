@@ -59,6 +59,13 @@ func formatRedacted(f fmt.State, verb rune, typeName string, fields []field) {
 	_, _ = f.Write([]byte(out))
 }
 
+// Config and Client must stay fmt.Formatters: a logged destination must
+// never print its credentials.
+var (
+	_ = fmt.Formatter(Config{})
+	_ = fmt.Formatter(Client{})
+)
+
 // Format implements fmt.Formatter so no verb ever prints SecretAccessKey.
 func (c Config) Format(f fmt.State, verb rune) {
 	httpClient := "nil"

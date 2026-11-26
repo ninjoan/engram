@@ -83,6 +83,7 @@ func (r *sendReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	r.u.wd.bodyRead()
 	// Ask for one byte more than remains so a source that grew is detected
 	// before its last declared bytes are handed to the connection.
 	if int64(len(p)) > r.remaining+1 {
@@ -118,6 +119,10 @@ func (r *sendReader) Read(p []byte) (int, error) {
 // watchdog cancels a PutObject that stops making progress: while the body is
 // being sent it fires after stall without new bytes; once the whole body is
 // handed to the connection it fires when no response arrives within response.
+// Stall detection is armed by the transport's first read of the body, which
+// happens only after the connection (dial, proxy, TLS) is set up, so a slow
+// connection setup is never reported as a stalled upload; setup is bounded
+// by the transport's timeouts and the caller's ctx.
 type watchdog struct {
 	cancel   context.CancelCauseFunc
 	stall    time.Duration
@@ -132,11 +137,11 @@ func newWatchdog(cancel context.CancelCauseFunc, stall, response time.Duration, 
 	w := &watchdog{cancel: cancel, stall: stall, response: response, bodyDone: bodyDone}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	first := stall
-	if bodyDone {
-		first = response
+	w.timer = time.AfterFunc(response, w.fire)
+	if !bodyDone {
+		// Disarmed until the first body read (see bodyRead).
+		w.timer.Stop()
 	}
-	w.timer = time.AfterFunc(first, w.fire)
 	return w
 }
 
@@ -149,6 +154,12 @@ func (w *watchdog) fire() {
 		return
 	}
 	w.cancel(fmt.Errorf("%w: no request body bytes were sent for %s", ErrUploadStalled, w.stall))
+}
+
+// bodyRead marks a read of the body by the transport: the connection is set
+// up and it accepted the previous bytes, so the stall timer (re)starts.
+func (w *watchdog) bodyRead() {
+	w.progress()
 }
 
 func (w *watchdog) progress() {
@@ -168,12 +179,13 @@ func (w *watchdog) bodySent() {
 	}
 }
 
-// restart re-arms stall detection for a retried send attempt.
+// restart disarms the watchdog for a retried send attempt; the retry's first
+// body read arms stall detection again, after its connection is set up.
 func (w *watchdog) restart() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.bodyDone = false
-	w.timer.Reset(w.stall)
+	w.timer.Stop()
 }
 
 func (w *watchdog) stop() {

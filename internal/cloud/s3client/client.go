@@ -28,9 +28,12 @@ const (
 	// DefaultCheckAccessTimeout bounds CheckAccess when ctx has no deadline.
 	DefaultCheckAccessTimeout = 30 * time.Second
 	// DefaultStallTimeout aborts a PutObject whose request body makes no
-	// progress (no bytes accepted by the connection) for this long. There is
-	// no overall upload deadline: a slow but steady upload of any allowed
-	// size completes; only the caller's ctx bounds its total duration.
+	// progress (no bytes accepted by the connection) for this long. It starts
+	// at the transport's first body read, after the connection is set up;
+	// dial, proxy and TLS setup are bounded by the transport timeouts and
+	// the caller's ctx. There is no overall upload deadline: a slow but
+	// steady upload of any allowed size completes; only the caller's ctx
+	// bounds its total duration.
 	DefaultStallTimeout = 2 * time.Minute
 	// DefaultResponseTimeout bounds the wait for the server's response once
 	// the whole request body has been handed to the connection.
@@ -58,7 +61,8 @@ type Config struct {
 	// deadline); a nil Transport becomes one with dial, TLS handshake,
 	// response header and idle connection timeouts.
 	HTTPClient *http.Client
-	// StallTimeout defaults to DefaultStallTimeout; negative is invalid.
+	// StallTimeout defaults to DefaultStallTimeout; negative is invalid. It
+	// measures body progress only, from the first body read on.
 	StallTimeout time.Duration
 }
 
