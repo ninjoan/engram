@@ -4,16 +4,19 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/backupcrypto"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 )
 
-// invalidBackupKey decodes as hex but is not 32 bytes long, so
-// cloud.ConfigFromEnv reports it as BackupKeyError.
+// invalidBackupKey is neither valid hex nor valid base64 (its "-not-a-key"
+// suffix breaks both), so cloud.ConfigFromEnv reports it as BackupKeyError.
+// Its "secretish" tail lets the tests prove errors never echo the key.
 const invalidBackupKey = "0123456789abcdef0123456789abcdef-not-a-key-but-secretish"
 
 func backupKeyConfigFromEnv(t *testing.T, value string) cloud.Config {
@@ -65,10 +68,27 @@ func TestRunCloudServeRefusesInvalidBackupKeyBeforeListening(t *testing.T) {
 
 func TestCloudRuntimeBackupOptionsRejectsInvalidBackupKey(t *testing.T) {
 	cfg := backupKeyConfigFromEnv(t, invalidBackupKey)
-	options, err := cloudRuntimeBackupOptions(cfg, nil)
+	backups, err := cloudRuntimeBackupOptions(cfg, &cloudstore.CloudStore{})
 	assertInvalidBackupKeyError(t, err)
-	if options != nil {
-		t.Fatalf("invalid key must yield no server options, got %d", len(options))
+	if backups.options != nil || backups.sealer != nil || backups.runner != nil {
+		t.Fatalf("invalid key must yield no backup wiring, got %+v", backups)
+	}
+}
+
+func TestCloudRuntimeBackupOptionsNewSealerFailureRefusesToStart(t *testing.T) {
+	cfg := backupKeyConfigFromEnv(t, hex.EncodeToString([]byte(strings.Repeat("k", backupcrypto.KeySize))))
+	original := newCloudBackupSealer
+	t.Cleanup(func() { newCloudBackupSealer = original })
+	newCloudBackupSealer = func(*backupcrypto.Key) (*backupcrypto.Sealer, error) {
+		return nil, fmt.Errorf("backupcrypto: init cipher: %w", backupcrypto.ErrInvalidKey)
+	}
+	backups, err := cloudRuntimeBackupOptions(cfg, &cloudstore.CloudStore{})
+	assertInvalidBackupKeyError(t, err)
+	if want := cloudServeBackupKeyError(cloud.Config{BackupKeyError: backupcrypto.ErrInvalidKey}); !strings.HasPrefix(err.Error(), strings.SplitN(want.Error(), "(", 2)[0]) {
+		t.Fatalf("NewSealer failure %q does not use the startup refusal wording %q", err, want)
+	}
+	if backups.options != nil || backups.sealer != nil || backups.runner != nil {
+		t.Fatalf("a failed sealer must yield no backup wiring, got %+v", backups)
 	}
 }
 
@@ -85,12 +105,20 @@ func TestCloudRuntimeBackupOptionsAcceptsValidOrAbsentBackupKey(t *testing.T) {
 			if (value != "") != (cfg.BackupKey != nil) {
 				t.Fatalf("fixture key parse mismatch: set=%v parsed=%v", value != "", cfg.BackupKey != nil)
 			}
-			options, err := cloudRuntimeBackupOptions(cfg, nil)
+			backups, err := cloudRuntimeBackupOptions(cfg, &cloudstore.CloudStore{})
 			if err != nil {
 				t.Fatalf("cloudRuntimeBackupOptions: %v", err)
 			}
-			if len(options) != 1 {
-				t.Fatalf("expected the backup settings option, got %d options", len(options))
+			if value == "" {
+				// No key: read-only settings, no runner, no "Back up now".
+				if len(backups.options) != 1 || backups.sealer != nil || backups.runner != nil {
+					t.Fatalf("absent key wiring = %d options, sealer %v, runner %v; want only read-only settings", len(backups.options), backups.sealer != nil, backups.runner != nil)
+				}
+			} else {
+				// A valid key makes the settings writable and starts the runner.
+				if len(backups.options) != 2 || backups.sealer == nil || backups.runner == nil {
+					t.Fatalf("valid key wiring = %d options, sealer %v, runner %v; want settings with a sealer plus the runner", len(backups.options), backups.sealer != nil, backups.runner != nil)
+				}
 			}
 			if err := cloudServeBackupKeyError(cfg); err != nil {
 				t.Fatalf("cloudServeBackupKeyError: %v", err)

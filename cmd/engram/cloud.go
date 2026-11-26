@@ -16,6 +16,7 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/backupcrypto"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/backuprunner"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudserver"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
@@ -74,10 +75,25 @@ type cloudServerRuntime interface {
 type defaultCloudRuntime struct {
 	server *cloudserver.CloudServer
 	store  *cloudstore.CloudStore
+	// backups runs scheduled and manual backups; nil without
+	// ENGRAM_CLOUD_BACKUP_KEY.
+	backups *backuprunner.Runner
 }
 
+// Start serves until the startup listener stops. The backup runner starts
+// first (so "Back up now" works once routes are published) and, on shutdown,
+// is canceled and waited for, so an in-flight run records its result before
+// the store is closed.
 func (r *defaultCloudRuntime) Start(startup *cloudserver.StartupListener) error {
 	defer r.store.Close()
+	if r.backups != nil {
+		ctx, cancel := context.WithCancel(startup.InitializationContext())
+		r.backups.Start(ctx)
+		defer func() {
+			cancel()
+			r.backups.Wait()
+		}()
+	}
 	return r.server.Start(startup)
 }
 
@@ -108,35 +124,74 @@ func newCloudRuntimeWithReceipt(ctx context.Context, cfg cloud.Config, verifier 
 		_ = cs.Close()
 		return nil, err
 	}
-	backupOptions, err := cloudRuntimeBackupOptions(cfg, cs)
+	runtime, err := assembleCloudRuntime(cfg, cs, allowedProjects, authenticator, managedHasher)
+	if err != nil {
+		return nil, err
+	}
+	return runtime, nil
+}
+
+// assembleCloudRuntime builds the server over an opened store, appending the
+// backup wiring to the server options. It closes cs when it fails.
+func assembleCloudRuntime(cfg cloud.Config, cs *cloudstore.CloudStore, allowedProjects []string, authenticator cloudserver.Authenticator, managedHasher *auth.ManagedTokenHasher) (*defaultCloudRuntime, error) {
+	backups, err := cloudRuntimeBackupOptions(cfg, cs)
 	if err != nil {
 		_ = cs.Close()
 		return nil, err
 	}
-	options := append(cloudRuntimeServerOptions(cfg, cs, allowedProjects, authenticator, managedHasher, cs), backupOptions...)
+	options := append(cloudRuntimeServerOptions(cfg, cs, allowedProjects, authenticator, managedHasher, cs), backups.options...)
 	return &defaultCloudRuntime{
-		server: cloudserver.New(cs, authenticator, cfg.Port, options...),
-		store:  cs,
+		server:  cloudserver.New(cs, authenticator, cfg.Port, options...),
+		store:   cs,
+		backups: backups.runner,
 	}, nil
 }
 
+// cloudRuntimeBackups is the backup wiring of cloud serve: the server
+// options, the sealer of the destination credentials and the backup runner.
+type cloudRuntimeBackups struct {
+	options []cloudserver.Option
+	// sealer is nil without ENGRAM_CLOUD_BACKUP_KEY: the settings are
+	// read-only.
+	sealer *backupcrypto.Sealer
+	// runner is nil without ENGRAM_CLOUD_BACKUP_KEY: no scheduled backups
+	// and no "Back up now" button.
+	runner *backuprunner.Runner
+}
+
+// cloud.Config carries the parsed ENGRAM_CLOUD_BACKUP_KEY; the key must stay
+// a fmt.Formatter that redacts itself so a logged config never prints it.
+var _ = fmt.Formatter(backupcrypto.Key{})
+
+// newCloudBackupSealer builds the sealer of ENGRAM_CLOUD_BACKUP_KEY; tests
+// replace it to reach the failure branch a parsed key cannot trigger.
+var newCloudBackupSealer = backupcrypto.NewSealer
+
 // cloudRuntimeBackupOptions wires the dashboard backup settings (external
-// destination, schedule, run history) to the store. Without
-// ENGRAM_CLOUD_BACKUP_KEY the settings are shown read-only with an
-// explanation; a set but invalid key is a startup error, never a silently
-// disabled feature.
-func cloudRuntimeBackupOptions(cfg cloud.Config, cs *cloudstore.CloudStore) ([]cloudserver.Option, error) {
+// destination, schedule, run history) and the backup runner to the store.
+// Without ENGRAM_CLOUD_BACKUP_KEY the settings are shown read-only with an
+// explanation and no runner exists; a set but invalid key is a startup
+// error, never a silently disabled feature.
+func cloudRuntimeBackupOptions(cfg cloud.Config, cs *cloudstore.CloudStore) (cloudRuntimeBackups, error) {
 	if err := cloudServeBackupKeyError(cfg); err != nil {
-		return nil, err
+		return cloudRuntimeBackups{}, err
 	}
 	if cfg.BackupKey == nil {
-		return []cloudserver.Option{cloudserver.WithBackupSettings(cs, nil)}, nil
+		return cloudRuntimeBackups{options: []cloudserver.Option{cloudserver.WithBackupSettings(cs, nil)}}, nil
 	}
-	sealer, err := backupcrypto.NewSealer(cfg.BackupKey)
+	sealer, err := newCloudBackupSealer(cfg.BackupKey)
 	if err != nil {
-		return nil, fmt.Errorf("cloud serve: invalid ENGRAM_CLOUD_BACKUP_KEY: %w", err)
+		return cloudRuntimeBackups{}, cloudServeBackupKeyRefusal(err)
 	}
-	return []cloudserver.Option{cloudserver.WithBackupSettings(cs, sealer)}, nil
+	runner, err := backuprunner.New(backuprunner.Config{Store: cs, Key: sealer, EngramVersion: version})
+	if err != nil {
+		return cloudRuntimeBackups{}, fmt.Errorf("cloud serve: refusing to start: backup runner: %w", err)
+	}
+	return cloudRuntimeBackups{
+		options: []cloudserver.Option{cloudserver.WithBackupSettings(cs, sealer), cloudserver.WithBackupRunner(runner)},
+		sealer:  sealer,
+		runner:  runner,
+	}, nil
 }
 
 // cloudServeBackupKeyError reports a set but invalid ENGRAM_CLOUD_BACKUP_KEY.
@@ -145,7 +200,13 @@ func cloudServeBackupKeyError(cfg cloud.Config) error {
 	if cfg.BackupKeyError == nil {
 		return nil
 	}
-	return fmt.Errorf("cloud serve: refusing to start: invalid ENGRAM_CLOUD_BACKUP_KEY (%w); set 32 random bytes as hex or base64, for example from `openssl rand -hex 32`, or unset it to disable scheduled backups", cfg.BackupKeyError)
+	return cloudServeBackupKeyRefusal(cfg.BackupKeyError)
+}
+
+// cloudServeBackupKeyRefusal is the startup refusal for an unusable
+// ENGRAM_CLOUD_BACKUP_KEY; cause never contains the key.
+func cloudServeBackupKeyRefusal(cause error) error {
+	return fmt.Errorf("cloud serve: refusing to start: invalid ENGRAM_CLOUD_BACKUP_KEY (%w); set 32 random bytes as hex or base64, for example from `openssl rand -hex 32`, or unset it to disable scheduled backups", cause)
 }
 
 func cloudRuntimeServerOptions(cfg cloud.Config, cs *cloudstore.CloudStore, allowedProjects []string, authenticator cloudserver.Authenticator, managedHasher *auth.ManagedTokenHasher, grantStore cloudProjectGrantStore) []cloudserver.Option {
