@@ -933,6 +933,23 @@ func (cs *CloudStore) migrateSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_audit_log_occurred_at ON cloud_sync_audit_log (occurred_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_log_contributor_project ON cloud_sync_audit_log (contributor, project)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_log_outcome ON cloud_sync_audit_log (outcome)`,
+		// cloud_backup_destinations: the single external backup destination.
+		// Credentials are sealed with ENGRAM_CLOUD_BACKUP_KEY (see
+		// backup_destination.go); the table is never exported in a backup.
+		`CREATE TABLE IF NOT EXISTS cloud_backup_destinations (
+			id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+			kind TEXT NOT NULL CHECK (kind IN ('s3')),
+			endpoint TEXT NOT NULL,
+			region TEXT NOT NULL,
+			bucket TEXT NOT NULL,
+			prefix TEXT NOT NULL DEFAULT '',
+			access_key_id_hint TEXT NOT NULL DEFAULT '',
+			access_key_id_ciphertext TEXT NOT NULL,
+			secret_access_key_ciphertext TEXT NOT NULL,
+			key_fingerprint TEXT NOT NULL,
+			updated_by_principal_id BIGINT REFERENCES cloud_principals(id) ON DELETE SET NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {

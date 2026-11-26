@@ -1,6 +1,58 @@
 package cloud
 
-import "testing"
+import (
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/backupcrypto"
+)
+
+func TestConfigFromEnvBackupKey(t *testing.T) {
+	t.Run("absent disables the feature without an error", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_BACKUP_KEY", " ")
+		cfg := ConfigFromEnv()
+		if cfg.BackupKey != nil || cfg.BackupKeyError != nil {
+			t.Fatalf("blank key = (%v, %v), want (nil, nil)", cfg.BackupKey, cfg.BackupKeyError)
+		}
+	})
+
+	t.Run("valid key is parsed and independent from other secrets", func(t *testing.T) {
+		encoded := hex.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+		t.Setenv("ENGRAM_CLOUD_BACKUP_KEY", encoded)
+		t.Setenv("ENGRAM_JWT_SECRET", "session-signing-secret")
+		t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper")
+		cfg := ConfigFromEnv()
+		if cfg.BackupKeyError != nil || cfg.BackupKey == nil {
+			t.Fatalf("valid key = (%v, %v)", cfg.BackupKey, cfg.BackupKeyError)
+		}
+		if _, err := backupcrypto.NewSealer(cfg.BackupKey); err != nil {
+			t.Fatalf("parsed key cannot seal: %v", err)
+		}
+		if cfg.TokenPepper != "dedicated-cloud-token-pepper" || cfg.JWTSecret != "session-signing-secret" {
+			t.Fatalf("backup key changed other secrets: pepper %q jwt %q", cfg.TokenPepper, cfg.JWTSecret)
+		}
+		if out := fmt.Sprintf("%+v %#v", cfg, cfg); strings.Contains(out, "0123456789abcdef") || strings.Contains(out, encoded[:16]) {
+			t.Fatalf("formatted config leaks the backup key: %s", out)
+		}
+	})
+
+	t.Run("invalid key is reported, not silently ignored", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_BACKUP_KEY", "too-short-key")
+		cfg := ConfigFromEnv()
+		if cfg.BackupKey != nil {
+			t.Fatalf("invalid key produced a key")
+		}
+		if !errors.Is(cfg.BackupKeyError, backupcrypto.ErrInvalidKey) {
+			t.Fatalf("BackupKeyError = %v, want %v", cfg.BackupKeyError, backupcrypto.ErrInvalidKey)
+		}
+		if strings.Contains(cfg.BackupKeyError.Error(), "too-short-key") {
+			t.Fatalf("error %q echoes the configured key", cfg.BackupKeyError)
+		}
+	})
+}
 
 func TestConfigFromEnvStartupReceiptDir(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_STARTUP_RECEIPT_DIR", " ")

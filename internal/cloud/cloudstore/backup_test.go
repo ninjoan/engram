@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -85,5 +86,41 @@ func TestRestoreBackupRejectsUnknownTablesAndSequencesWithoutWriting(t *testing.
 	}
 	if controls != 0 {
 		t.Fatalf("failed restore left %d control rows, want 0", controls)
+	}
+}
+
+func TestBackupExcludesTheSealedDestinationTable(t *testing.T) {
+	if slices.Contains(BackupTables(), backupDestinationsTable) {
+		t.Fatalf("BackupTables() carries %s", backupDestinationsTable)
+	}
+	if _, ok := BackupTableColumns(backupDestinationsTable); ok {
+		t.Fatalf("%s has backup columns", backupDestinationsTable)
+	}
+	found := false
+	for _, exclusion := range BackupExclusions() {
+		if exclusion.Table == backupDestinationsTable && exclusion.Column == "" {
+			found = strings.Contains(exclusion.Reason, "ENGRAM_CLOUD_BACKUP_KEY")
+		}
+	}
+	if !found {
+		t.Fatalf("BackupExclusions() = %+v, want %s with a key reason", BackupExclusions(), backupDestinationsTable)
+	}
+}
+
+func TestRestoreBackupRefusesTargetWithAConfiguredDestination(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+	if _, err := cs.db.ExecContext(ctx, `
+		INSERT INTO cloud_backup_destinations (id, kind, endpoint, region, bucket, prefix, access_key_id_hint, access_key_id_ciphertext, secret_access_key_ciphertext, key_fingerprint)
+		VALUES (1, 's3', 'https://acct.example.test', 'auto', 'engram-backups', '', '****ABCD', 'v1:x:y', 'v1:x:z', 'x')`); err != nil {
+		t.Fatalf("seed destination: %v", err)
+	}
+	inserted := false
+	err := cs.RestoreBackup(ctx, BackupRestoreOptions{}, func(*BackupWriter) error { inserted = true; return nil })
+	if !errors.Is(err, ErrBackupTargetNotEmpty) {
+		t.Fatalf("restore error = %v, want %v", err, ErrBackupTargetNotEmpty)
+	}
+	if !strings.Contains(err.Error(), backupDestinationsTable) || inserted {
+		t.Fatalf("error %q does not name the destination table, or rows were inserted (%v)", err, inserted)
 	}
 }
