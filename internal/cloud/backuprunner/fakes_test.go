@@ -113,7 +113,20 @@ type fakeStore struct {
 	expireCalls []time.Duration
 	nextID      int64
 	opener      cloudstore.BackupSecretOpener
+	// calls records expire, start and finish calls in call order.
+	calls []string
+	// startFailures makes StartBackupRun fail this many times before it
+	// records a run; negative fails every time.
+	startFailures int
+	// startHook runs after a run is recorded; an error it returns is
+	// returned with the row kept, like a commit whose reply is lost.
+	startHook func(ctx context.Context) error
+	// finishFailures makes FinishBackupRun fail this many times; negative
+	// fails every time.
+	finishFailures int
 }
+
+var errStoreUnavailable = errors.New("fake store: connection reset by peer")
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{creds: testCreds, redacts: map[int64][]string{}}
@@ -129,6 +142,28 @@ func (s *fakeStore) setCredsErr(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.credsErr = err
+}
+
+func (s *fakeStore) setScheduleErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scheduleErr = err
+}
+
+func (s *fakeStore) callLog() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
+}
+
+func (s *fakeStore) countCalls(name string) int {
+	n := 0
+	for _, c := range s.callLog() {
+		if c == name {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *fakeStore) GetBackupSchedule(context.Context) (cloudstore.BackupSchedule, error) {
@@ -147,9 +182,32 @@ func (s *fakeStore) OpenBackupDestinationCredentials(_ context.Context, opener c
 	return s.creds, nil
 }
 
-func (s *fakeStore) StartBackupRun(_ context.Context, params cloudstore.StartBackupRunParams) (cloudstore.BackupRun, error) {
+func (s *fakeStore) StartBackupRun(ctx context.Context, params cloudstore.StartBackupRunParams) (cloudstore.BackupRun, error) {
+	run, err := s.startBackupRun(params)
+	if err != nil {
+		return run, err
+	}
+	s.mu.Lock()
+	hook := s.startHook
+	s.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx); err != nil {
+			return cloudstore.BackupRun{}, err
+		}
+	}
+	return run, nil
+}
+
+func (s *fakeStore) startBackupRun(params cloudstore.StartBackupRunParams) (cloudstore.BackupRun, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls = append(s.calls, "start")
+	if s.startFailures != 0 {
+		if s.startFailures > 0 {
+			s.startFailures--
+		}
+		return cloudstore.BackupRun{}, errStoreUnavailable
+	}
 	for _, run := range s.runs {
 		if params.Trigger == cloudstore.BackupRunTriggerScheduled && run.Trigger == cloudstore.BackupRunTriggerScheduled && run.ScheduledFor.Equal(params.ScheduledFor) {
 			return cloudstore.BackupRun{}, cloudstore.ErrBackupRunAlreadyRecorded
@@ -167,6 +225,13 @@ func (s *fakeStore) StartBackupRun(_ context.Context, params cloudstore.StartBac
 func (s *fakeStore) FinishBackupRun(_ context.Context, params cloudstore.FinishBackupRunParams) (cloudstore.BackupRun, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls = append(s.calls, "finish")
+	if s.finishFailures != 0 {
+		if s.finishFailures > 0 {
+			s.finishFailures--
+		}
+		return cloudstore.BackupRun{}, errStoreUnavailable
+	}
 	for i, run := range s.runs {
 		if run.ID != params.ID {
 			continue
@@ -191,6 +256,7 @@ func (s *fakeStore) ExpireStaleBackupRuns(_ context.Context, olderThan time.Dura
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireCalls = append(s.expireCalls, olderThan)
+	s.calls = append(s.calls, "expire")
 	return 0, nil
 }
 

@@ -50,7 +50,7 @@ func TestSchedulerUploadsAtTheComputedSlot(t *testing.T) {
 	if len(puts) != 1 {
 		t.Fatalf("uploads = %d, want 1", len(puts))
 	}
-	wantKey := "prod/nightly/engram-cloud-backup-20261130T030000Z.tar.gz"
+	wantKey := "prod/nightly/engram-cloud-backup-20261130T030000Z-run1.tar.gz"
 	if puts[0].key != wantKey || puts[0].contentType != "application/gzip" || puts[0].size != int64(len(archiveBytes)) || !bytes.Equal(puts[0].body, archiveBytes) {
 		t.Fatalf("upload = key %q type %q size %d body %q; want %q application/gzip %d", puts[0].key, puts[0].contentType, puts[0].size, puts[0].body, wantKey, len(archiveBytes))
 	}
@@ -228,6 +228,7 @@ func TestSchedulerExpiresStaleRunsAtStartupAndBeforeEachRun(t *testing.T) {
 func TestManualBackupRunsInTheBackground(t *testing.T) {
 	h := newHarness(t, beforeSlot, nil)
 	h.start(t)
+	h.clock.waitSleeping(t) // the loop's startup expiry is done
 	id, err := h.runner.StartManualBackup(context.Background(), "42")
 	if err != nil || id == 0 {
 		t.Fatalf("StartManualBackup = %d, %v", id, err)
@@ -241,11 +242,12 @@ func TestManualBackupRunsInTheBackground(t *testing.T) {
 		t.Fatalf("run = %+v", run)
 	}
 	puts := h.uploader.snapshot()
-	if len(puts) != 1 || puts[0].key != "prod/nightly/engram-cloud-backup-20261130T025900Z.tar.gz" || run.ObjectKey != puts[0].key {
+	if len(puts) != 1 || puts[0].key != "prod/nightly/engram-cloud-backup-20261130T025900Z-run1.tar.gz" || run.ObjectKey != puts[0].key {
 		t.Fatalf("puts = %+v, run key %q", puts, run.ObjectKey)
 	}
-	if h.store.expireCount() < 2 {
-		t.Fatalf("stale runs were not expired before the manual run")
+	// Stale runs are expired before the manual run is recorded.
+	if calls, want := h.store.callLog(), []string{"expire", "expire", "start", "finish"}; strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("store calls = %v, want %v", calls, want)
 	}
 	h.assertTempDirEmpty(t)
 }
@@ -583,61 +585,100 @@ func TestDefaultTempDirIsTheSystemTempDir(t *testing.T) {
 	}
 }
 
-// Start removes archive temp files a killed server left behind: only
-// regular files named like the archive, never symlinks, directories or
-// other names.
-func TestStartRemovesStaleArchiveTempFilesOnly(t *testing.T) {
-	h := newHarness(t, beforeSlot, nil)
-	write := func(path string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte("plaintext archive"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	stale := []string{"engram-cloud-backup-123456789.tar.gz", "engram-cloud-backup-.tar.gz"}
-	kept := []string{
-		"engram-cloud-backup-1.tar", "engram-cloud-backup-1.tar.gz.part", "other-123.tar.gz",
-		"xengram-cloud-backup-1.tar.gz", "engram-cloud-backup-export-1",
-	}
-	for _, name := range append(append([]string(nil), stale...), kept...) {
-		write(filepath.Join(h.tempDir, name))
-	}
-	dirName := "engram-cloud-backup-dir.tar.gz"
-	if err := os.Mkdir(filepath.Join(h.tempDir, dirName), 0o700); err != nil {
+func writeTestFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("plaintext archive"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	write(filepath.Join(h.tempDir, dirName, "inside"))
-	target := filepath.Join(t.TempDir(), "engram-cloud-backup-target.tar.gz")
-	write(target)
-	link := "engram-cloud-backup-link.tar.gz"
-	symlinked := os.Symlink(target, filepath.Join(h.tempDir, link)) == nil
-	if symlinked {
-		kept = append(kept, link)
+}
+
+// Start removes what a killed server left behind: regular upload temp files
+// (engram-cloud-backup-upload-*.tar.gz) and export spool directories
+// (engram-cloud-backup-export-*). Symlinks are never followed or removed,
+// and other names, including archives downloaded from the dashboard, stay.
+func TestStartRemovesStaleUploadFilesAndExportSpoolDirsOnly(t *testing.T) {
+	h := newHarness(t, beforeSlot, nil)
+	stale := []string{"engram-cloud-backup-upload-123456789.tar.gz", "engram-cloud-backup-upload-.tar.gz"}
+	kept := []string{
+		"engram-cloud-backup-20261126T000000Z.tar.gz", // a download from the dashboard
+		"engram-cloud-backup-123456789.tar.gz",        // the previous upload prefix
+		"engram-cloud-backup-upload-1.tar", "engram-cloud-backup-upload-1.tar.gz.part", "other-123.tar.gz",
+		"xengram-cloud-backup-upload-1.tar.gz", "engram-cloud-backup-export-file",
+		"engram-cloud-backup-import-1",
+	}
+	for _, name := range append(append([]string(nil), stale...), kept...) {
+		writeTestFile(t, filepath.Join(h.tempDir, name))
+	}
+	spool := "engram-cloud-backup-export-4242"
+	if err := os.MkdirAll(filepath.Join(h.tempDir, spool, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(h.tempDir, spool, "table-1.jsonl"))
+	writeTestFile(t, filepath.Join(h.tempDir, spool, "nested", "member"))
+	keptDirs := []string{"engram-cloud-backup-upload-dir.tar.gz", "xengram-cloud-backup-export-1"}
+	for _, dir := range keptDirs {
+		if err := os.Mkdir(filepath.Join(h.tempDir, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, filepath.Join(h.tempDir, dir, "inside"))
+	}
+
+	// Symlinks named like an upload file or a spool dir stay, and so do
+	// their targets.
+	outside := t.TempDir()
+	targetFile := filepath.Join(outside, "engram-cloud-backup-upload-target.tar.gz")
+	writeTestFile(t, targetFile)
+	targetDir := filepath.Join(outside, "engram-cloud-backup-export-target")
+	if err := os.Mkdir(targetDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(targetDir, "inside"))
+	links := map[string]string{
+		"engram-cloud-backup-upload-link.tar.gz":     targetFile,
+		"engram-cloud-backup-export-link":            targetDir,
+		"engram-cloud-backup-upload-dangling.tar.gz": filepath.Join(outside, "missing"),
+		"engram-cloud-backup-export-dangling":        filepath.Join(outside, "missing-dir"),
+	}
+	symlinked := true
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(h.tempDir, name)); err != nil {
+			symlinked = false // e.g. Windows without the privilege
+			break
+		}
 	}
 
 	h.start(t)
 	h.clock.waitSleeping(t)
 
-	for _, name := range stale {
+	for _, name := range append(stale, spool) {
 		if _, err := os.Lstat(filepath.Join(h.tempDir, name)); !os.IsNotExist(err) {
-			t.Errorf("stale archive %s was not removed (%v)", name, err)
+			t.Errorf("stale %s was not removed (%v)", name, err)
 		}
 	}
-	for _, name := range append(kept, dirName, filepath.Join(dirName, "inside")) {
-		if _, err := os.Lstat(filepath.Join(h.tempDir, name)); err != nil {
-			t.Errorf("%s was removed: %v", name, err)
+	for _, name := range kept {
+		if data, err := os.ReadFile(filepath.Join(h.tempDir, name)); err != nil || string(data) != "plaintext archive" {
+			t.Errorf("%s was removed or changed: %q %v", name, data, err)
+		}
+	}
+	for _, dir := range keptDirs {
+		if _, err := os.Lstat(filepath.Join(h.tempDir, dir, "inside")); err != nil {
+			t.Errorf("directory %s was removed: %v", dir, err)
 		}
 	}
 	if symlinked {
-		if info, err := os.Lstat(filepath.Join(h.tempDir, link)); err != nil || info.Mode()&os.ModeSymlink == 0 {
-			t.Errorf("symlink changed: %v %v", info, err)
+		for name := range links {
+			if info, err := os.Lstat(filepath.Join(h.tempDir, name)); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("symlink %s changed: %v %v", name, info, err)
+			}
 		}
 	}
-	if data, err := os.ReadFile(target); err != nil || string(data) != "plaintext archive" {
-		t.Errorf("symlink target changed: %q %v", data, err)
+	for _, target := range []string{targetFile, filepath.Join(targetDir, "inside")} {
+		if data, err := os.ReadFile(target); err != nil || string(data) != "plaintext archive" {
+			t.Errorf("symlink target %s changed: %q %v", target, data, err)
+		}
 	}
-	if logs := h.logs.text(); !strings.Contains(logs, "removed 2 stale backup archive temp file(s) from "+h.tempDir) {
-		t.Errorf("logs = %q, want the removed count", logs)
+	if logs := h.logs.text(); !strings.Contains(logs, "removed 2 stale backup archive temp file(s) and 1 export spool dir(s) from "+h.tempDir) {
+		t.Errorf("logs = %q, want the removed counts", logs)
 	}
 }
 
@@ -655,7 +696,7 @@ func TestStartWithoutStaleArchivesLogsNothing(t *testing.T) {
 // configured temp directory.
 func TestArchiveTempFileIsPrivateAndInTheTempDir(t *testing.T) {
 	var mode os.FileMode
-	var dir string
+	var dir, name string
 	h := newHarness(t, beforeSlot, func(cfg *Config) {
 		cfg.Export = func(ctx context.Context, w io.Writer) error {
 			f, ok := w.(*os.File)
@@ -666,7 +707,7 @@ func TestArchiveTempFileIsPrivateAndInTheTempDir(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			mode, dir = info.Mode().Perm(), filepath.Dir(f.Name())
+			mode, dir, name = info.Mode().Perm(), filepath.Dir(f.Name()), filepath.Base(f.Name())
 			return writeArchive(ctx, w)
 		}
 	})
@@ -683,6 +724,9 @@ func TestArchiveTempFileIsPrivateAndInTheTempDir(t *testing.T) {
 	}
 	if dir != h.tempDir {
 		t.Fatalf("temp file dir = %s, want %s", dir, h.tempDir)
+	}
+	if match, _ := filepath.Match("engram-cloud-backup-upload-*.tar.gz", name); !match {
+		t.Fatalf("temp file name = %s, want engram-cloud-backup-upload-*.tar.gz", name)
 	}
 	if runtime.GOOS != "windows" && mode != 0o600 {
 		t.Fatalf("temp file mode = %o, want 600", mode)

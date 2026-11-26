@@ -170,15 +170,16 @@ func TestTwoRunnersOnOneDatabaseUploadASlotOnce(t *testing.T) {
 			t.Fatalf("runner sent %s; it only ever uploads (never deletes)", m)
 		}
 	}
-	wantPath := "/engram-backups/shared/engram-cloud-backup-20261130T030000Z.tar.gz"
+	runs, err := cs.ListBackupRuns(ctx, 10)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs = %+v, %v", runs, err)
+	}
+	wantKey := fmt.Sprintf("shared/engram-cloud-backup-20261130T030000Z-run%d.tar.gz", runs[0].ID)
+	wantPath := "/engram-backups/" + wantKey
 	if puts[0] != wantPath || len(bodies[0]) < 2 || bodies[0][0] != 0x1f || bodies[0][1] != 0x8b {
 		t.Fatalf("PUT %s with %d bytes, want %s holding a gzip archive", puts[0], len(bodies[0]), wantPath)
 	}
-	runs, err := cs.ListBackupRuns(ctx, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(runs) != 1 || runs[0].Status != cloudstore.BackupRunStatusSuccess || runs[0].ObjectKey != "shared/engram-cloud-backup-20261130T030000Z.tar.gz" || runs[0].SizeBytes != int64(len(bodies[0])) {
+	if runs[0].Status != cloudstore.BackupRunStatusSuccess || runs[0].ObjectKey != wantKey || runs[0].SizeBytes != int64(len(bodies[0])) {
 		t.Fatalf("runs = %+v", runs)
 	}
 	entries, _ := os.ReadDir(tempDir)
@@ -294,7 +295,12 @@ func TestBusyRunnerLeavesTheSlotToAFreeRunnerOnPostgres(t *testing.T) {
 		runs, err := cs.ListBackupRuns(ctx, 10)
 		return err == nil && len(runs) == 2 && runs[0].Trigger == cloudstore.BackupRunTriggerScheduled && runs[0].Status == cloudstore.BackupRunStatusSuccess
 	})
-	if puts, _, _ := s3.snapshot(); len(puts) != 1 || puts[0] != "/engram-backups/shared/engram-cloud-backup-20261130T030000Z.tar.gz" {
-		t.Fatalf("scheduled PUTs = %v, want the 03:00 slot once", puts)
+	runs, err := cs.ListBackupRuns(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := fmt.Sprintf("/engram-backups/shared/engram-cloud-backup-20261130T030000Z-run%d.tar.gz", runs[0].ID)
+	if puts, _, _ := s3.snapshot(); len(puts) != 1 || puts[0] != wantPath {
+		t.Fatalf("scheduled PUTs = %v, want the 03:00 slot once at %s", puts, wantPath)
 	}
 }

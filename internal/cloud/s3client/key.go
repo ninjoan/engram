@@ -2,6 +2,7 @@ package s3client
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -9,11 +10,13 @@ import (
 
 const maxKeyBytes = 1024
 
-// BackupObjectKey returns "<prefix>/engram-cloud-backup-YYYYMMDDTHHMMSSZ.tar.gz"
-// for t in UTC. Surrounding spaces and empty path segments in prefix are
+// BackupRunObjectKey returns
+// "<prefix>/engram-cloud-backup-YYYYMMDDTHHMMSSZ-run<runID>.tar.gz" for t in
+// UTC. The run id keeps two runs started in the same second from writing
+// the same object. Surrounding spaces and empty path segments in prefix are
 // dropped, so the key never starts with "/" or contains "//".
-func BackupObjectKey(prefix string, t time.Time) string {
-	name := "engram-cloud-backup-" + t.UTC().Format(amzDateFormat) + ".tar.gz"
+func BackupRunObjectKey(prefix string, t time.Time, runID int64) string {
+	name := "engram-cloud-backup-" + t.UTC().Format(amzDateFormat) + "-run" + strconv.FormatInt(runID, 10) + ".tar.gz"
 	var segments []string
 	for _, s := range strings.Split(strings.TrimSpace(prefix), "/") {
 		if s != "" {

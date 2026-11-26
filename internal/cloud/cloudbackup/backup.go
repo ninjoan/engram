@@ -122,6 +122,11 @@ type spooledMember struct {
 	sha256 string
 }
 
+// ExportSpoolPattern is the os.MkdirTemp pattern of the private directory
+// where Export spools plaintext members. Callers that clean up after a hard
+// kill must match this exact pattern.
+const ExportSpoolPattern = "engram-cloud-backup-export-*"
+
 func tableMemberName(table string) string {
 	return tableMemberPrefix + table + tableMemberSuffix
 }
@@ -130,7 +135,7 @@ func tableMemberName(table string) string {
 // snapshot. Members are spooled to temp files first so backup.json, written
 // last, can carry the size and checksum of every member.
 func Export(ctx context.Context, src Source, w io.Writer, opts ExportOptions) (Summary, error) {
-	spoolDir, err := os.MkdirTemp(opts.TempDir, "engram-cloud-backup-export-*")
+	spoolDir, err := os.MkdirTemp(opts.TempDir, ExportSpoolPattern)
 	if err != nil {
 		return Summary{}, fmt.Errorf("cloudbackup: create spool dir: %w", err)
 	}

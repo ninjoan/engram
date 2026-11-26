@@ -11,8 +11,8 @@
 // uploads it; a server busy with another run leaves the slot to the others.
 // A run that stays "running" past the stale threshold belongs to a server
 // that stopped mid-run and is marked interrupted. When it starts, the runner
-// removes archive temp files that a killed server left in its temp
-// directory.
+// removes the upload temp files and export spool directories that a killed
+// server left in its temp directory.
 package backuprunner
 
 import (
@@ -55,12 +55,27 @@ const (
 	// ContentType is the content type of an uploaded archive.
 	ContentType = "application/gzip"
 
-	// finishTimeout bounds recording a result, even during shutdown.
+	// claimTimeout bounds recording the start of a run. The claim ignores
+	// the caller's cancellation, so a request or shutdown that ends while
+	// the row commits cannot leave it "running".
+	claimTimeout = 30 * time.Second
+	// finishTimeout bounds recording a result, all attempts included, even
+	// during shutdown.
 	finishTimeout = 30 * time.Second
+	// finishAttempts is how often recording a result is tried.
+	finishAttempts = 3
+	// finishBackoff is the default wait before the second attempt to
+	// record a result; the third waits twice as long.
+	finishBackoff = time.Second
 
-	// archiveTempPattern names the archive temp file of a run; the startup
-	// sweep removes only regular files matching it.
-	archiveTempPattern = "engram-cloud-backup-*.tar.gz"
+	// uploadTempPattern names the archive temp file of a run. It differs
+	// from the name of an archive downloaded from the dashboard
+	// (engram-cloud-backup-<time>.tar.gz), so the startup sweep, which
+	// removes regular files matching it, never touches a download.
+	uploadTempPattern = "engram-cloud-backup-upload-*.tar.gz"
+	// exportSpoolPattern names the spool directory of cloudbackup.Export;
+	// the startup sweep removes directories matching it.
+	exportSpoolPattern = cloudbackup.ExportSpoolPattern
 )
 
 // Messages recorded in the run history. A slot that could not run is
@@ -142,6 +157,9 @@ type Runner struct {
 	newUploader    func(cloudstore.BackupDestinationCredentials) (Uploader, error)
 	export         func(context.Context, io.Writer) error
 	logf           func(string, ...any)
+	// finishBackoff is the wait before the second attempt to record a
+	// result; each later attempt waits twice as long.
+	finishBackoff time.Duration
 
 	// busy is held by the one run this server executes at a time.
 	busy atomic.Bool
@@ -174,6 +192,7 @@ func New(cfg Config) (*Runner, error) {
 		poll: cfg.PollInterval, staleAfter: cfg.StaleAfter, exportTimeout: cfg.ExportTimeout,
 		uploadDeadline: cfg.UploadDeadline, tempDir: cfg.TempDir,
 		newUploader: cfg.NewUploader, export: cfg.Export, logf: cfg.Logf,
+		finishBackoff: finishBackoff,
 	}
 	if r.poll < 0 || r.staleAfter < 0 || r.exportTimeout < 0 {
 		return nil, errors.New("backuprunner: intervals must not be negative")
@@ -266,7 +285,7 @@ func (r *Runner) StartManualBackup(ctx context.Context, actorPrincipalID string)
 		return 0, fmt.Errorf("%w on this server", cloudserver.ErrBackupAlreadyRunning)
 	}
 	r.expireStale(ctx)
-	run, err := r.store.StartBackupRun(ctx, cloudstore.StartBackupRunParams{
+	run, err := r.claim(ctx, cloudstore.StartBackupRunParams{
 		Trigger: cloudstore.BackupRunTriggerManual, ActorPrincipalID: actorPrincipalID, RefuseIfRunning: true,
 	})
 	if err != nil {
@@ -289,7 +308,9 @@ func (r *Runner) StartManualBackup(ctx context.Context, actorPrincipalID string)
 // loop runs every slot of the schedule. It re-reads the schedule at least
 // every poll interval. A slot is due once it is at or before now and after
 // the previous check, so slots that passed while the server was down, busy
-// or before the schedule was changed are not caught up.
+// or before the schedule was changed are not caught up. A slot whose
+// schedule could not be read or whose claim failed is tried again at the
+// next poll.
 func (r *Runner) loop(ctx context.Context) {
 	defer r.wg.Done()
 	r.expireStale(ctx)
@@ -309,9 +330,13 @@ func (r *Runner) loop(ctx context.Context) {
 		default:
 			slot, ok := schedule.NextRun(checked)
 			if ok && !slot.After(now) {
-				r.runScheduled(ctx, slot)
-				checked = laterOf(slot, r.clock.Now())
-				continue
+				if r.runScheduled(ctx, slot) {
+					checked = laterOf(slot, r.clock.Now())
+					continue
+				}
+				// The claim failed: checked stays put, so the slot is
+				// claimed again after the poll interval.
+				break
 			}
 			if ok && slot.Sub(now) < wait {
 				wait = slot.Sub(now)
@@ -333,59 +358,89 @@ func laterOf(a, b time.Time) time.Time {
 	return b
 }
 
-// runScheduled claims slot for this server and runs it. A slot another
-// server already claimed is skipped without a trace. A slot that arrives
-// while this server is still running a backup is not claimed, so a free
-// server sharing the database can run it; with no such server it is not
-// run at all.
-func (r *Runner) runScheduled(ctx context.Context, slot time.Time) {
+// runScheduled claims slot for this server and runs it. It reports false
+// when the claim failed, so the caller tries the slot again later. A slot
+// another server already claimed is skipped without a trace. A slot that
+// arrives while this server is still running a backup is not claimed, so a
+// free server sharing the database can run it; with no such server it is
+// not run at all.
+func (r *Runner) runScheduled(ctx context.Context, slot time.Time) bool {
 	if !r.busy.CompareAndSwap(false, true) {
 		r.logf("[engram-cloud] scheduled backup %s not claimed: this server is still running another backup; another server may run it", slot.UTC().Format(time.RFC3339))
-		return
+		return true
 	}
 	defer r.busy.Store(false)
 	r.expireStale(ctx)
-	run, err := r.store.StartBackupRun(ctx, cloudstore.StartBackupRunParams{Trigger: cloudstore.BackupRunTriggerScheduled, ScheduledFor: slot})
+	if ctx.Err() != nil {
+		return true // shutting down: claim nothing
+	}
+	run, err := r.claim(ctx, cloudstore.StartBackupRunParams{Trigger: cloudstore.BackupRunTriggerScheduled, ScheduledFor: slot})
 	switch {
 	case errors.Is(err, cloudstore.ErrBackupRunAlreadyRecorded):
 		r.logf("[engram-cloud] scheduled backup %s is already recorded by another server; skipping", slot.UTC().Format(time.RFC3339))
-		return
+		return true
 	case err != nil:
-		if ctx.Err() == nil {
-			r.logf("[engram-cloud] scheduled backup %s not started: record run: %v", slot.UTC().Format(time.RFC3339), err)
-		}
-		return
+		r.logf("[engram-cloud] scheduled backup %s not started: record run: %v; retrying at the next poll", slot.UTC().Format(time.RFC3339), err)
+		return false
 	}
 	r.execute(ctx, run, slot)
+	return true
 }
 
-// sweepStaleArchives removes the archive temp files that a server of this
-// user left in the temp directory when it was killed (SIGKILL, out of
-// memory) before its own cleanup ran. It removes only regular files named
-// like the archive and owned by this user; symlinks are never followed.
+// claim records the start of a run. It ignores ctx's cancellation (a
+// request or shutdown ending while the row commits would otherwise leave
+// it "running" with nobody to finish it) and is bounded by claimTimeout.
+// After a shutdown the claimed run is recorded as canceled.
+func (r *Runner) claim(ctx context.Context, params cloudstore.StartBackupRunParams) (cloudstore.BackupRun, error) {
+	claimCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claimTimeout)
+	defer cancel()
+	return r.store.StartBackupRun(claimCtx, params)
+}
+
+// sweepStaleArchives removes what a server of this user left in the temp
+// directory when it was killed (SIGKILL, out of memory) before its own
+// cleanup ran: regular files named like an upload temp file and
+// directories named like an export spool directory, both owned by this
+// user. Symlinks are never followed or removed; other names and file types
+// are left alone.
 func (r *Runner) sweepStaleArchives() {
 	entries, err := os.ReadDir(r.tempDir)
 	if err != nil {
 		r.logf("[engram-cloud] backup runner: sweep stale archive temp files: %v", err)
 		return
 	}
-	removed := 0
+	files, dirs := 0, 0
 	for _, entry := range entries {
-		if match, _ := filepath.Match(archiveTempPattern, entry.Name()); !match || !entry.Type().IsRegular() {
+		name := entry.Name()
+		isUpload, _ := filepath.Match(uploadTempPattern, name)
+		isSpool, _ := filepath.Match(exportSpoolPattern, name)
+		if !isUpload && !isSpool {
 			continue
 		}
-		info, err := entry.Info() // lstat: a symlink is never followed
-		if err != nil || !info.Mode().IsRegular() || !ownedByCurrentUser(info) {
+		info, err := os.Lstat(filepath.Join(r.tempDir, name)) // a symlink is never followed
+		if err != nil || !ownedByCurrentUser(info) {
 			continue
 		}
-		if err := os.Remove(filepath.Join(r.tempDir, entry.Name())); err != nil {
-			r.logf("[engram-cloud] backup runner: remove stale archive temp file: %v", err)
-			continue
+		path := filepath.Join(r.tempDir, name)
+		switch {
+		case isUpload && info.Mode().IsRegular():
+			if err := os.Remove(path); err != nil {
+				r.logf("[engram-cloud] backup runner: remove stale archive temp file: %v", err)
+				continue
+			}
+			files++
+		case isSpool && info.IsDir():
+			// RemoveAll removes symlinks inside the directory without
+			// following them.
+			if err := os.RemoveAll(path); err != nil {
+				r.logf("[engram-cloud] backup runner: remove stale export spool dir: %v", err)
+				continue
+			}
+			dirs++
 		}
-		removed++
 	}
-	if removed > 0 {
-		r.logf("[engram-cloud] backup runner: removed %d stale backup archive temp file(s) from %s", removed, r.tempDir)
+	if files > 0 || dirs > 0 {
+		r.logf("[engram-cloud] backup runner: removed %d stale backup archive temp file(s) and %d export spool dir(s) from %s", files, dirs, r.tempDir)
 	}
 }
 
@@ -430,7 +485,7 @@ func (r *Runner) execute(ctx context.Context, run cloudstore.BackupRun, stamp ti
 		result.ErrorMessage = "invalid backup destination: " + err.Error()
 		return
 	}
-	key := s3client.BackupObjectKey(creds.Prefix, stamp)
+	key := s3client.BackupRunObjectKey(creds.Prefix, stamp, run.ID)
 	size, err := r.exportAndUpload(ctx, uploader, key)
 	if err != nil {
 		result.ErrorMessage = err.Error()
@@ -442,7 +497,7 @@ func (r *Runner) execute(ctx context.Context, run cloudstore.BackupRun, stamp ti
 // exportAndUpload writes the archive to a private temp file and uploads it
 // under an overall deadline. The temp file is always removed.
 func (r *Runner) exportAndUpload(ctx context.Context, uploader Uploader, key string) (int64, error) {
-	file, err := os.CreateTemp(r.tempDir, archiveTempPattern) // mode 0600
+	file, err := os.CreateTemp(r.tempDir, uploadTempPattern) // mode 0600
 	if err != nil {
 		return 0, fmt.Errorf("create the archive temp file: %w", err)
 	}
@@ -497,13 +552,31 @@ func (r *Runner) failure(ctx context.Context, what string, err error) string {
 }
 
 // finish records the result with a context that survives shutdown, so a
-// canceled run is recorded instead of staying "running".
+// canceled run is recorded instead of staying "running". A failed attempt
+// is retried with a short backoff, up to finishAttempts attempts within
+// finishTimeout; a run that is no longer running is not retried. When every
+// attempt fails, the log names the run's status and object key (never the
+// raw error message or credentials) and the stale expiry later marks the
+// run interrupted.
 func (r *Runner) finish(ctx context.Context, params cloudstore.FinishBackupRunParams) {
 	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
 	defer cancel()
-	run, err := r.store.FinishBackupRun(recordCtx, params)
+	var run cloudstore.BackupRun
+	var err error
+	attempts := 0
+	for backoff := r.finishBackoff; ; backoff *= 2 {
+		attempts++
+		run, err = r.store.FinishBackupRun(recordCtx, params)
+		if err == nil || attempts == finishAttempts || errors.Is(err, cloudstore.ErrBackupRunNotRunning) || !sleepCtx(recordCtx, backoff) {
+			break
+		}
+	}
 	if err != nil {
-		r.logf("[engram-cloud] backup run %d: record result: %v", params.ID, err)
+		plural := "s"
+		if attempts == 1 {
+			plural = ""
+		}
+		r.logf("[engram-cloud] backup run %d: could not record the result (status %s, object key %q) after %d attempt%s: %v", params.ID, params.Status, params.ObjectKey, attempts, plural, err)
 		return
 	}
 	if run.Status == cloudstore.BackupRunStatusSuccess {
@@ -512,6 +585,18 @@ func (r *Runner) finish(ctx context.Context, params cloudstore.FinishBackupRunPa
 	}
 	// The stored message is already sanitized; log that, never the raw error.
 	r.logf("[engram-cloud] backup run %d failed: %s", run.ID, run.ErrorMessage)
+}
+
+// sleepCtx waits d and reports false when ctx ends first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // isNil reports a nil interface or a typed nil pointer.
