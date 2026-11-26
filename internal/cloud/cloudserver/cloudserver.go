@@ -86,6 +86,11 @@ type CloudServer struct {
 	maxPushBodyBytes    int64
 	mux                 *http.ServeMux
 	syncStatus          dashboard.SyncStatusProvider
+	// backupSource is the snapshot surface the dashboard backup download
+	// exports from (the chunk store when it satisfies BackupSource);
+	// backupExport overrides the export itself and is a test seam only.
+	backupSource BackupSource
+	backupExport func(ctx context.Context, w io.Writer) error
 	// version is the optional running build identifier surfaced in the
 	// dashboard chrome (Layout footer + LoginPage). An empty identifier is
 	// displayed as "version unknown" on both surfaces.
@@ -233,6 +238,9 @@ func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *Clo
 	if principalState, ok := store.(principalStateStore); ok {
 		s.principalState = principalState
 	}
+	if backupSource, ok := store.(BackupSource); ok {
+		s.backupSource = backupSource
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -351,6 +359,10 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("POST /dashboard/admin/tokens/{tokenID}/revoke", s.requireDashboardSession(s.handleDashboardRevokeManagedToken))
 	s.mux.HandleFunc("POST /dashboard/admin/users/{principalID}/grants", s.requireDashboardSession(s.handleDashboardCreateManagedGrant))
 	s.mux.HandleFunc("POST /dashboard/admin/users/{principalID}/grants/{project}/revoke", s.requireDashboardSession(s.handleDashboardRevokeManagedGrant))
+	// On-demand backup download (dashboard_backup.go): managed admin only,
+	// audited before streaming. No import/restore route exists by design.
+	s.mux.HandleFunc("POST /dashboard/admin/backups/download", s.requireDashboardSession(s.handleDashboardBackupDownload))
+	s.mux.HandleFunc("GET /dashboard/admin/backups/download", s.requireDashboardSession(s.handleDashboardBackupDownloadMethodNotAllowed))
 	s.mux.HandleFunc("GET /sync/pull", s.withAuth(s.handlePullManifest))
 	s.mux.HandleFunc("GET /sync/pull/{chunkID}", s.withAuth(s.handlePullChunk))
 	s.mux.HandleFunc("POST /sync/push", s.withAuth(s.handlePushChunk))

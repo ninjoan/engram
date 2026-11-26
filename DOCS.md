@@ -340,6 +340,8 @@ Dashboard route tree (`engram cloud serve`):
   - `POST /dashboard/admin/users/{principalID}/grants` — create project grant
   - `POST /dashboard/admin/users/{principalID}/grants/{project}/revoke` — revoke project grant
   - Managed-user detail and form routes use the dashboard session, unlike the JSON `/admin/*` API. Viewing detail allows dashboard admin sessions; mutations require managed-admin permission. Successful form mutations redirect (303, or `HX-Redirect` for HTMX), except token creation, which renders the show-once token directly without redirecting.
+  - `GET /dashboard/admin/backups` (admin-gated) — what a backup contains and excludes; the download form renders only for managed-admin sessions
+  - `POST /dashboard/admin/backups/download` — managed admin only (members and legacy admin sessions get 403; `GET` gets 405). Records a `backup.download` auth audit event first (audit failure returns 500 and sends nothing), then streams the archive as `application/gzip` with `Content-Disposition: attachment; filename="engram-cloud-backup-<yyyymmddThhmmssZ>.tar.gz"` (UTC) and `Cache-Control: no-store`. An export failure before the first byte returns 500; a failure mid-stream aborts the connection, so the browser reports a failed download. See [Cloud Backup and Restore](#cloud-backup-and-restore).
   - `GET /dashboard/admin/health` (admin-gated)
   - `POST /dashboard/admin/projects/{name}/sync` (admin-gated; toggle sync enabled/disabled)
   - `GET /dashboard/admin/projects/{name}/sync/form` (admin-gated; HTMX partial)
@@ -1236,7 +1238,9 @@ The backfill is project-scoped, non-destructive, and idempotent: it inserts miss
 
 ### Cloud Backup and Restore
 
-`engram cloud backup` is an operator command that runs against the Postgres database in `ENGRAM_DATABASE_URL`, like `cloud repair`. It has no HTTP or dashboard route: archives are not signed, so only an operator with database access may restore one.
+`engram cloud backup` is an operator command that runs against the Postgres database in `ENGRAM_DATABASE_URL`, like `cloud repair`. Import has no HTTP or dashboard route: archives are not signed, so only an operator with database access may restore one.
+
+A managed admin can also download the same archive from the dashboard: **Admin → Backups** (`/dashboard/admin/backups`) → **Download backup**. Each download is recorded in the auth audit log as `backup.download` before the archive is sent. Legacy admin sessions can view the page but must sign in with a managed admin token (or use `engram cloud backup export` on the server) to download.
 
 ```bash
 ENGRAM_DATABASE_URL='postgres://...' engram cloud backup export --output engram-cloud.tar.gz
@@ -1258,7 +1262,7 @@ ENGRAM_DATABASE_URL='postgres://<fresh-db>' engram cloud backup import --input e
 - Legacy `cloud_users` rows are restored without password hashes and cannot log in.
 - Run `engram cloud bootstrap admin` only if the backup held no managed admin.
 
-**Protect the archive.** It contains plaintext memories, prompts, and audit history. Keep it at mode `0600`, restrict who can read it, and encrypt it before copying it off the host. Engram does not encrypt, upload, schedule, or expire backup archives; storage, retention, off-host copies, and restore rehearsal remain the operator's responsibility (see the [production checklist](docs/engram-cloud/production-checklist.md)).
+**Protect the archive.** It contains plaintext memories, prompts, and audit history. Keep it at mode `0600`, restrict who can read it, and encrypt it before copying it off the host. This applies equally to an archive downloaded from the dashboard. Engram does not encrypt, upload, schedule, or expire backup archives; storage, retention, off-host copies, and restore rehearsal remain the operator's responsibility (see the [production checklist](docs/engram-cloud/production-checklist.md)).
 
 ### Local Cloud Bring-Up (Docker + Postgres)
 

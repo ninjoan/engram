@@ -25,6 +25,8 @@ const (
 	authAuditActionTokenRevoke = "token.revoke"
 	authAuditActionGrantCreate = "grant.create"
 	authAuditActionGrantRevoke = "grant.revoke"
+
+	authAuditActionBackupDownload = "backup.download"
 )
 
 // AdminIdentityStore is the storage boundary used by cloudserver admin API
