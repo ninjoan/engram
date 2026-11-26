@@ -580,20 +580,21 @@ func TestNewValidatesEndpointAndConfig(t *testing.T) {
 
 func TestHTTPClientDefaultsAndCallerClientIsNotMutated(t *testing.T) {
 	c := newTestClient(t, Config{Endpoint: "https://r2.example.com"})
-	if c.httpClient.Timeout != DefaultTimeout || c.httpClient.CheckRedirect == nil {
+	if c.httpClient.Timeout != 0 || c.httpClient.CheckRedirect == nil {
 		t.Fatalf("default client timeout = %s, CheckRedirect set = %v", c.httpClient.Timeout, c.httpClient.CheckRedirect != nil)
 	}
-	caller := &http.Client{Timeout: 5 * time.Second}
+	callerTransport := &http.Transport{}
+	caller := &http.Client{Timeout: 5 * time.Second, Transport: callerTransport}
 	c = newTestClient(t, Config{Endpoint: "https://r2.example.com", HTTPClient: caller})
-	if c.httpClient == caller || c.httpClient.Timeout != 5*time.Second || c.httpClient.CheckRedirect == nil {
+	if c.httpClient == caller || c.httpClient.Timeout != 5*time.Second || c.httpClient.CheckRedirect == nil || c.httpClient.Transport != callerTransport {
 		t.Fatalf("caller client not copied with redirect refusal: %+v", c.httpClient)
 	}
 	if caller.CheckRedirect != nil {
 		t.Fatalf("caller client was mutated")
 	}
 	c = newTestClient(t, Config{Endpoint: "https://r2.example.com", HTTPClient: &http.Client{}})
-	if c.httpClient.Timeout != DefaultTimeout {
-		t.Fatalf("zero caller timeout should default, got %s", c.httpClient.Timeout)
+	if c.httpClient.Timeout != 0 {
+		t.Fatalf("zero caller timeout must stay zero (no overall upload deadline), got %s", c.httpClient.Timeout)
 	}
 }
 
@@ -685,7 +686,8 @@ func TestClientExposesNoDeleteOperation(t *testing.T) {
 	for i := 0; i < typ.NumMethod(); i++ {
 		names = append(names, typ.Method(i).Name)
 	}
-	if !reflect.DeepEqual(names, []string{"CheckAccess", "PutObject"}) {
-		t.Fatalf("exported Client methods = %v, want only CheckAccess and PutObject", names)
+	// Format only renders a redacted view (W1); it performs no request.
+	if !reflect.DeepEqual(names, []string{"CheckAccess", "Format", "PutObject"}) {
+		t.Fatalf("exported Client methods = %v, want only CheckAccess, Format and PutObject", names)
 	}
 }

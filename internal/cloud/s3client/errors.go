@@ -23,6 +23,7 @@ var (
 	ErrNetwork          = errors.New("network error")
 	ErrRedirect         = errors.New("redirect refused")
 	ErrUnexpectedStatus = errors.New("unexpected response status")
+	ErrUploadStalled    = errors.New("upload stalled")
 )
 
 // Error describes a failed S3 request. It never carries credentials or
