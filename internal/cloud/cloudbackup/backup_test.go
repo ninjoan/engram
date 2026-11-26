@@ -28,8 +28,9 @@ import (
 )
 
 // restoredTables is the independent expectation of every table a backup
-// restores verbatim; cloud_principal_tokens and cloud_backup_destinations must
-// never be exported or restored.
+// restores verbatim; cloud_principal_tokens, cloud_backup_destinations,
+// cloud_backup_schedule and cloud_backup_runs must never be exported or
+// restored.
 var restoredTables = []string{
 	"cloud_users", "cloud_principals", "cloud_human_users", "cloud_project_grants",
 	"cloud_project_controls", "cloud_auth_audit_log", "cloud_sync_audit_log",
@@ -37,7 +38,7 @@ var restoredTables = []string{
 	"cloud_chunks", "cloud_project_sessions", "cloud_mutations",
 }
 
-var allCloudTables = append(append([]string{}, restoredTables...), "cloud_principal_tokens", "cloud_backup_destinations")
+var allCloudTables = append(append([]string{}, restoredTables...), "cloud_principal_tokens", "cloud_backup_destinations", "cloud_backup_schedule", "cloud_backup_runs")
 
 var schemaCounter atomic.Int64
 
@@ -450,7 +451,7 @@ func TestExportArchiveExcludesCredentialsAndPutsManifestLast(t *testing.T) {
 	must(t, err)
 	raw, err := io.ReadAll(gz)
 	must(t, err)
-	for _, secret := range append([]string{seeded.tokenHash, seeded.tokenPrefix, "cloud_principal_tokens.jsonl", "password_hash\":", "cloud_backup_destinations.jsonl"}, destination...) {
+	for _, secret := range append([]string{seeded.tokenHash, seeded.tokenPrefix, "cloud_principal_tokens.jsonl", "password_hash\":", "cloud_backup_destinations.jsonl", "cloud_backup_schedule.jsonl", "cloud_backup_runs.jsonl", "run-history-object-key-excluded"}, destination...) {
 		if bytes.Contains(raw, []byte(secret)) {
 			t.Errorf("archive contains %q", secret)
 		}
@@ -522,7 +523,7 @@ func TestExportArchiveExcludesCredentialsAndPutsManifestLast(t *testing.T) {
 		}
 		excluded[entry.Table+"."+entry.Column] = true
 	}
-	for _, want := range []string{"cloud_principal_tokens.", "cloud_users.password_hash", "receipt_audit.*.", "cloud_backup_destinations."} {
+	for _, want := range []string{"cloud_principal_tokens.", "cloud_users.password_hash", "receipt_audit.*.", "cloud_backup_destinations.", "cloud_backup_schedule.", "cloud_backup_runs."} {
 		if !excluded[want] {
 			t.Errorf("manifest exclusions %+v miss %q", manifest.Excluded, want)
 		}
@@ -546,6 +547,16 @@ func seedBackupDestination(t *testing.T, s isolatedStore) []string {
 	}, sealer))
 	var accessCipher, secretCipher string
 	must(t, s.db.QueryRow(`SELECT access_key_id_ciphertext, secret_access_key_ciphertext FROM cloud_backup_destinations`).Scan(&accessCipher, &secretCipher))
+	// The schedule and run history are operational state of this server and
+	// are excluded too; the run's object key must not reach the archive.
+	must(t, s.cs.PutBackupSchedule(ctx, cloudstore.PutBackupScheduleParams{
+		Enabled: true, Weekdays: []time.Weekday{time.Monday}, TimeOfDay: "03:00", Timezone: "UTC",
+		Actor: cloudstore.BackupDestinationActor{Source: "test"},
+	}))
+	run, err := s.cs.StartBackupRun(ctx, cloudstore.StartBackupRunParams{Trigger: cloudstore.BackupRunTriggerManual})
+	must(t, err)
+	_, err = s.cs.FinishBackupRun(ctx, cloudstore.FinishBackupRunParams{ID: run.ID, Status: cloudstore.BackupRunStatusSuccess, ObjectKey: "run-history-object-key-excluded", SizeBytes: 1})
+	must(t, err)
 	// The audit log (which is archived) describes the destination without
 	// secrets, so only credentials and their ciphertexts are checked here.
 	return []string{accessKeyID, secret, accessCipher, secretCipher}

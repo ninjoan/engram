@@ -124,3 +124,46 @@ func TestRestoreBackupRefusesTargetWithAConfiguredDestination(t *testing.T) {
 		t.Fatalf("error %q does not name the destination table, or rows were inserted (%v)", err, inserted)
 	}
 }
+
+func TestBackupExcludesBackupScheduleAndRunHistory(t *testing.T) {
+	for _, table := range []string{backupScheduleTable, backupRunsTable} {
+		if slices.Contains(BackupTables(), table) {
+			t.Fatalf("BackupTables() carries %s", table)
+		}
+		if _, ok := BackupTableColumns(table); ok {
+			t.Fatalf("%s has backup columns", table)
+		}
+		found := false
+		for _, exclusion := range BackupExclusions() {
+			if exclusion.Table == table && exclusion.Column == "" && exclusion.Reason != "" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("BackupExclusions() = %+v, want %s with a reason", BackupExclusions(), table)
+		}
+	}
+}
+
+func TestRestoreBackupRefusesTargetWithScheduleOrRunHistory(t *testing.T) {
+	ctx := context.Background()
+	for table, seed := range map[string]string{
+		backupScheduleTable: `INSERT INTO cloud_backup_schedule (id, enabled, weekdays, time_of_day, timezone) VALUES (1, FALSE, 0, '03:00', 'UTC')`,
+		backupRunsTable:     `INSERT INTO cloud_backup_runs (trigger, status) VALUES ('manual', 'running')`,
+	} {
+		t.Run(table, func(t *testing.T) {
+			cs := openIsolatedCloudStore(t)
+			if _, err := cs.db.ExecContext(ctx, seed); err != nil {
+				t.Fatalf("seed %s: %v", table, err)
+			}
+			inserted := false
+			err := cs.RestoreBackup(ctx, BackupRestoreOptions{}, func(*BackupWriter) error { inserted = true; return nil })
+			if !errors.Is(err, ErrBackupTargetNotEmpty) {
+				t.Fatalf("restore error = %v, want %v", err, ErrBackupTargetNotEmpty)
+			}
+			if !strings.Contains(err.Error(), table) || inserted {
+				t.Fatalf("error %q does not name %s, or rows were inserted (%v)", err, table, inserted)
+			}
+		})
+	}
+}

@@ -30,6 +30,10 @@ const (
 	// backupDestinationsTable holds credentials sealed with the environment
 	// key ENGRAM_CLOUD_BACKUP_KEY; it is never exported.
 	backupDestinationsTable = "cloud_backup_destinations"
+	// backupScheduleTable and backupRunsTable are operational state of the
+	// server that ran the backups; they are never exported.
+	backupScheduleTable = "cloud_backup_schedule"
+	backupRunsTable     = "cloud_backup_runs"
 )
 
 // backupTableSpec is the backup contract of one table. Specs are listed in
@@ -65,9 +69,10 @@ var backupTableSpecs = []backupTableSpec{
 }
 
 // backupGuardedTables must be empty in a restore target in addition to every
-// backup table; they are never restored. A configured backup destination
-// means the target is already in use, so it is refused like any other row.
-var backupGuardedTables = []string{"cloud_principal_tokens", backupDestinationsTable}
+// backup table; they are never restored. A configured backup destination,
+// schedule or run history means the target is already in use, so it is
+// refused like any other row.
+var backupGuardedTables = []string{"cloud_principal_tokens", backupDestinationsTable, backupScheduleTable, backupRunsTable}
 
 // BackupExclusion documents data a backup deliberately does not carry.
 type BackupExclusion struct {
@@ -85,6 +90,8 @@ func BackupExclusions() []BackupExclusion {
 		{Table: "cloud_mutations", Column: "user_id", Reason: "legacy pre-migration column"},
 		{Table: "receipt_audit.*", Reason: "startup receipt audit bound to the physical PostgreSQL instance"},
 		{Table: backupDestinationsTable, Reason: "backup destination credentials sealed with ENGRAM_CLOUD_BACKUP_KEY; reconfigure the destination after restore"},
+		{Table: backupScheduleTable, Reason: "backup schedule of the source server; it depends on the excluded destination, so reconfigure it after restore"},
+		{Table: backupRunsTable, Reason: "backup run history of the source server; operational state, not restored"},
 	}
 }
 

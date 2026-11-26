@@ -950,6 +950,38 @@ func (cs *CloudStore) migrateSchema(ctx context.Context) error {
 			updated_by_principal_id BIGINT REFERENCES cloud_principals(id) ON DELETE SET NULL,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		// cloud_backup_schedule: the single weekday/time schedule for uploads
+		// to the destination (see backup_schedule.go). weekdays is a bitmask,
+		// bit n = time.Weekday n. Never exported in a backup.
+		`CREATE TABLE IF NOT EXISTS cloud_backup_schedule (
+			id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+			enabled BOOLEAN NOT NULL DEFAULT FALSE,
+			weekdays SMALLINT NOT NULL DEFAULT 0 CHECK (weekdays BETWEEN 0 AND 127),
+			time_of_day TEXT NOT NULL CHECK (time_of_day ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'),
+			timezone TEXT NOT NULL CHECK (timezone <> ''),
+			updated_by_principal_id BIGINT REFERENCES cloud_principals(id) ON DELETE SET NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CHECK (NOT enabled OR weekdays > 0)
+		)`,
+		// cloud_backup_runs: history of uploads to the destination (see
+		// backup_runs.go). A scheduled slot is recorded at most once. Never
+		// exported in a backup.
+		`CREATE TABLE IF NOT EXISTS cloud_backup_runs (
+			id BIGSERIAL PRIMARY KEY,
+			trigger TEXT NOT NULL CHECK (trigger IN ('scheduled', 'manual')),
+			scheduled_for TIMESTAMPTZ,
+			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			finished_at TIMESTAMPTZ,
+			status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failure')),
+			object_key TEXT NOT NULL DEFAULT '',
+			size_bytes BIGINT NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+			error_message TEXT NOT NULL DEFAULT '' CHECK (octet_length(error_message) <= 512),
+			actor_principal_id BIGINT REFERENCES cloud_principals(id) ON DELETE SET NULL,
+			CHECK ((trigger = 'scheduled') = (scheduled_for IS NOT NULL)),
+			CHECK ((status = 'running') = (finished_at IS NULL))
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS cloud_backup_runs_scheduled_uidx ON cloud_backup_runs (scheduled_for) WHERE trigger = 'scheduled'`,
+		`CREATE INDEX IF NOT EXISTS idx_cloud_backup_runs_started_at ON cloud_backup_runs (started_at DESC, id DESC)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {
