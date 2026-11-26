@@ -570,6 +570,17 @@ func TestImportRejectsInvalidArchivesAndLeavesTargetUnchanged(t *testing.T) {
 			wantErr: cloudstore.ErrBackupInvalidRow,
 		},
 		{
+			name: "manifest row count disagrees with member lines",
+			archive: rewriteArchive(t, archive, "", nil, func(m map[string]any) {
+				for _, raw := range m["tables"].([]any) {
+					if entry := raw.(map[string]any); entry["name"] == "cloud_mutations" {
+						entry["rows"] = entry["rows"].(float64) + 1
+					}
+				}
+			}, false),
+			wantErr: ErrInvalidArchive,
+		},
+		{
 			name:    "missing manifest",
 			archive: writeArchive(t, readArchive(t, archive)[:len(restoredTables)]),
 			wantErr: ErrInvalidArchive,

@@ -37,8 +37,11 @@ const (
 	DefaultMaxArchiveBytes int64 = 8 << 30
 
 	maxManifestBytes = 16 << 20
-	insertBatchRows  = 500
-	insertBatchBytes = 8 << 20
+	// maxTrailingPadding bounds the zero bytes accepted after the tar
+	// end-of-archive marker: one default tar record (blocking factor 20).
+	maxTrailingPadding = 20 * 512
+	insertBatchRows    = 500
+	insertBatchBytes   = 8 << 20
 )
 
 var (
@@ -297,8 +300,10 @@ func Import(ctx context.Context, dst Target, r io.Reader, opts ImportOptions) (S
 }
 
 // spoolArchive stages every table member and returns the manifest bytes. It
-// reads the gzip stream to its end so a truncated trailer is detected too.
-// The uncompressed bytes of all members together may not exceed limit.
+// reads the gzip stream to its end so a truncated trailer or checksum mismatch
+// is detected too; after the tar end-of-archive marker only zero padding of at
+// most maxTrailingPadding bytes is accepted. The uncompressed bytes of all
+// members together may not exceed limit.
 func spoolArchive(r io.Reader, dir string, limit int64) (map[string]spooledMember, []byte, error) {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -359,8 +364,14 @@ func spoolArchive(r io.Reader, dir string, limit int64) (map[string]spooledMembe
 		remaining -= spooled.size
 		members[header.Name] = spooled
 	}
-	if _, err := io.Copy(io.Discard, gz); err != nil {
+	// Reading short of the bound means the gzip reader hit EOF, which is when
+	// it verifies the stream checksum and size.
+	trailing, err := io.ReadAll(io.LimitReader(gz, maxTrailingPadding+1))
+	if err != nil {
 		return nil, nil, fmt.Errorf("%w: read compression trailer: %v", ErrInvalidArchive, err)
+	}
+	if len(trailing) > maxTrailingPadding || len(bytes.Trim(trailing, "\x00")) != 0 {
+		return nil, nil, fmt.Errorf("%w: trailing data after the end of the archive", ErrInvalidArchive)
 	}
 	if err := gz.Close(); err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidArchive, err)
