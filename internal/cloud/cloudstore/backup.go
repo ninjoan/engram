@@ -25,7 +25,12 @@ var (
 	ErrBackupInvalidSequence   = errors.New("cloudstore: invalid backup sequence floor")
 )
 
-const backupChunksTable = "cloud_chunks"
+const (
+	backupChunksTable = "cloud_chunks"
+	// backupDestinationsTable holds credentials sealed with the environment
+	// key ENGRAM_CLOUD_BACKUP_KEY; it is never exported.
+	backupDestinationsTable = "cloud_backup_destinations"
+)
 
 // backupTableSpec is the backup contract of one table. Specs are listed in
 // restore order so foreign keys are satisfied while rows are inserted.
@@ -60,8 +65,9 @@ var backupTableSpecs = []backupTableSpec{
 }
 
 // backupGuardedTables must be empty in a restore target in addition to every
-// backup table; they are never restored.
-var backupGuardedTables = []string{"cloud_principal_tokens"}
+// backup table; they are never restored. A configured backup destination
+// means the target is already in use, so it is refused like any other row.
+var backupGuardedTables = []string{"cloud_principal_tokens", backupDestinationsTable}
 
 // BackupExclusion documents data a backup deliberately does not carry.
 type BackupExclusion struct {
@@ -78,6 +84,7 @@ func BackupExclusions() []BackupExclusion {
 		{Table: "cloud_chunks", Column: "user_id,imported_at,sessions,memories,prompts", Reason: "legacy pre-migration columns superseded by current columns"},
 		{Table: "cloud_mutations", Column: "user_id", Reason: "legacy pre-migration column"},
 		{Table: "receipt_audit.*", Reason: "startup receipt audit bound to the physical PostgreSQL instance"},
+		{Table: backupDestinationsTable, Reason: "backup destination credentials sealed with ENGRAM_CLOUD_BACKUP_KEY; reconfigure the destination after restore"},
 	}
 }
 

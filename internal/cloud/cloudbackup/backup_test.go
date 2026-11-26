@@ -21,13 +21,15 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/backupcrypto"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // restoredTables is the independent expectation of every table a backup
-// restores verbatim; cloud_principal_tokens must never be restored.
+// restores verbatim; cloud_principal_tokens and cloud_backup_destinations must
+// never be exported or restored.
 var restoredTables = []string{
 	"cloud_users", "cloud_principals", "cloud_human_users", "cloud_project_grants",
 	"cloud_project_controls", "cloud_auth_audit_log", "cloud_sync_audit_log",
@@ -35,7 +37,7 @@ var restoredTables = []string{
 	"cloud_chunks", "cloud_project_sessions", "cloud_mutations",
 }
 
-var allCloudTables = append(append([]string{}, restoredTables...), "cloud_principal_tokens")
+var allCloudTables = append(append([]string{}, restoredTables...), "cloud_principal_tokens", "cloud_backup_destinations")
 
 var schemaCounter atomic.Int64
 
@@ -441,13 +443,14 @@ func TestRestoredStoreServesEverySourceCursorAndContinuesPastSourceSequence(t *t
 func TestExportArchiveExcludesCredentialsAndPutsManifestLast(t *testing.T) {
 	source := openIsolatedStore(t)
 	seeded := seedSource(t, source)
+	destination := seedBackupDestination(t, source)
 	archive, _ := exportArchive(t, source)
 
 	gz, err := gzip.NewReader(bytes.NewReader(archive))
 	must(t, err)
 	raw, err := io.ReadAll(gz)
 	must(t, err)
-	for _, secret := range []string{seeded.tokenHash, seeded.tokenPrefix, "cloud_principal_tokens.jsonl", "password_hash\":"} {
+	for _, secret := range append([]string{seeded.tokenHash, seeded.tokenPrefix, "cloud_principal_tokens.jsonl", "password_hash\":", "cloud_backup_destinations.jsonl"}, destination...) {
 		if bytes.Contains(raw, []byte(secret)) {
 			t.Errorf("archive contains %q", secret)
 		}
@@ -519,11 +522,33 @@ func TestExportArchiveExcludesCredentialsAndPutsManifestLast(t *testing.T) {
 		}
 		excluded[entry.Table+"."+entry.Column] = true
 	}
-	for _, want := range []string{"cloud_principal_tokens.", "cloud_users.password_hash", "receipt_audit.*."} {
+	for _, want := range []string{"cloud_principal_tokens.", "cloud_users.password_hash", "receipt_audit.*.", "cloud_backup_destinations."} {
 		if !excluded[want] {
 			t.Errorf("manifest exclusions %+v miss %q", manifest.Excluded, want)
 		}
 	}
+}
+
+// seedBackupDestination stores a sealed destination in s and returns the
+// values an archive must never carry.
+func seedBackupDestination(t *testing.T, s isolatedStore) []string {
+	t.Helper()
+	ctx := context.Background()
+	key, err := backupcrypto.ParseKey(hex.EncodeToString(bytes.Repeat([]byte{7}, backupcrypto.KeySize)))
+	must(t, err)
+	sealer, err := backupcrypto.NewSealer(key)
+	must(t, err)
+	const accessKeyID, secret = "AKIAARCHIVEEXCLUDED9", "archive-excluded-destination-secret"
+	must(t, s.cs.PutBackupDestination(ctx, cloudstore.PutBackupDestinationParams{
+		Endpoint: "https://destination-excluded.example.test", Region: "auto", Bucket: "destination-excluded-bucket",
+		AccessKeyID: accessKeyID, SecretAccessKey: secret,
+		Actor: cloudstore.BackupDestinationActor{Source: "test"},
+	}, sealer))
+	var accessCipher, secretCipher string
+	must(t, s.db.QueryRow(`SELECT access_key_id_ciphertext, secret_access_key_ciphertext FROM cloud_backup_destinations`).Scan(&accessCipher, &secretCipher))
+	// The audit log (which is archived) describes the destination without
+	// secrets, so only credentials and their ciphertexts are checked here.
+	return []string{accessKeyID, secret, accessCipher, secretCipher}
 }
 
 func TestImportRejectsInvalidArchivesAndLeavesTargetUnchanged(t *testing.T) {

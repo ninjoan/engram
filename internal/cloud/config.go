@@ -4,6 +4,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/backupcrypto"
 )
 
 type Config struct {
@@ -24,6 +26,17 @@ type Config struct {
 	// JWTSecret so rotating the dashboard/session signing secret does not
 	// implicitly rotate or invalidate stored managed token verifiers.
 	TokenPepper string
+	// BackupKey is the dedicated key (ENGRAM_CLOUD_BACKUP_KEY, 32 bytes as
+	// base64 or hex) that seals backup destination credentials at rest. It
+	// MUST be distinct from JWTSecret and TokenPepper so rotating either of
+	// those never changes whether stored destination credentials can be
+	// opened. Nil means the variable is unset and external backup
+	// destinations are disabled. The key never formats its bytes.
+	BackupKey *backupcrypto.Key
+	// BackupKeyError reports a set but invalid ENGRAM_CLOUD_BACKUP_KEY.
+	// Callers that use backup destinations must fail loudly on it rather
+	// than treating the feature as disabled. It never contains the key.
+	BackupKeyError error
 }
 
 const DefaultJWTSecret = "engram-dev-jwt-secret-for-local-smoke-1234"
@@ -48,6 +61,9 @@ func IsDefaultJWTSecret(secret string) bool {
 func ConfigFromEnv() Config {
 	cfg := DefaultConfig()
 	cfg.StartupReceiptDir = strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_STARTUP_RECEIPT_DIR"))
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_BACKUP_KEY")); v != "" {
+		cfg.BackupKey, cfg.BackupKeyError = backupcrypto.ParseKey(v)
+	}
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_DATABASE_URL")); v != "" {
 		cfg.DSN = v
 	}
