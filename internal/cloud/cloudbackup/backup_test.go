@@ -630,6 +630,79 @@ func TestImportRefusesNonEmptyTargetWithoutChangingIt(t *testing.T) {
 	}
 }
 
+func TestImportKeepsTargetSequenceThatIsAlreadyPastTheSource(t *testing.T) {
+	ctx := context.Background()
+	source := openIsolatedStore(t)
+	seedSource(t, source)
+	archive, exported := exportArchive(t, source)
+	const used = 500
+	if exported.MaxMutationSeq >= used {
+		t.Fatalf("source max seq %d must stay below %d", exported.MaxMutationSeq, used)
+	}
+
+	// A target that issued seqs and was then emptied keeps its sequence.
+	target := openIsolatedStore(t)
+	must(t, target.db.QueryRow(`SELECT setval(pg_get_serial_sequence('cloud_mutations', 'seq'), $1, true)`, used).Err())
+	if _, err := Import(ctx, target.cs, bytes.NewReader(archive), ImportOptions{}); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	var last int64
+	must(t, target.db.QueryRow(`SELECT pg_sequence_last_value(pg_get_serial_sequence('cloud_mutations', 'seq')::regclass)`).Scan(&last))
+	if last < used {
+		t.Errorf("restore lowered cloud_mutations seq to %d, want >= %d", last, used)
+	}
+	seqs, err := target.cs.InsertMutationBatch(ctx, []cloudstore.MutationEntry{{Project: "alpha", Entity: "observation", EntityKey: "obs-after", Op: "delete", Payload: json.RawMessage(`{"sync_id":"obs-after"}`)}})
+	must(t, err)
+	if len(seqs) != 1 || seqs[0] <= used {
+		t.Fatalf("post-restore write seqs = %v, want > %d", seqs, used)
+	}
+}
+
+func archiveUncompressedSize(t *testing.T, archive []byte) int64 {
+	t.Helper()
+	var total int64
+	for _, member := range readArchive(t, archive) {
+		total += int64(len(member.data))
+	}
+	return total
+}
+
+func TestImportRefusesArchiveOverSizeLimitAndRemovesSpool(t *testing.T) {
+	ctx := context.Background()
+	source := openIsolatedStore(t)
+	seedSource(t, source)
+	archive, _ := exportArchive(t, source)
+	total := archiveUncompressedSize(t, archive)
+
+	for _, limit := range []int64{64, total - 1} {
+		t.Run(fmt.Sprintf("limit %d", limit), func(t *testing.T) {
+			target := openIsolatedStore(t)
+			spool := t.TempDir()
+			_, err := Import(ctx, target.cs, bytes.NewReader(archive), ImportOptions{TempDir: spool, MaxArchiveBytes: limit})
+			if !errors.Is(err, ErrArchiveTooLarge) {
+				t.Fatalf("Import error = %v, want %v", err, ErrArchiveTooLarge)
+			}
+			if !strings.Contains(err.Error(), strconv.FormatInt(limit, 10)) {
+				t.Errorf("error %q does not name the limit %d", err, limit)
+			}
+			assertEmptyTarget(t, target)
+			entries, err := os.ReadDir(spool)
+			must(t, err)
+			if len(entries) != 0 {
+				t.Errorf("spool dir kept %d entries after the refused import", len(entries))
+			}
+		})
+	}
+
+	t.Run("limit equal to archive size", func(t *testing.T) {
+		target := openIsolatedStore(t)
+		if _, err := Import(ctx, target.cs, bytes.NewReader(archive), ImportOptions{MaxArchiveBytes: total}); err != nil {
+			t.Fatalf("Import at exact limit: %v", err)
+		}
+	})
+}
+
 func TestImportDryRunValidatesWithoutWriting(t *testing.T) {
 	ctx := context.Background()
 	source := openIsolatedStore(t)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -26,6 +27,37 @@ func TestReadBackupSnapshotRefusesChunkWhosePayloadDoesNotHashToItsID(t *testing
 	}
 	if emitted != 0 {
 		t.Fatalf("emitted %d rows before the mismatch, want 0", emitted)
+	}
+}
+
+func TestRestoreBackupFailureLeavesSequencesUnchanged(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+	read := func() (v int64, c bool) {
+		t.Helper()
+		if err := cs.db.QueryRowContext(ctx, `SELECT last_value, is_called FROM cloud_users_id_seq`).Scan(&v, &c); err != nil {
+			t.Fatal(err)
+		}
+		return v, c
+	}
+	bv, bc := read()
+	// cloud_users.id is valid and ordered first; the audit floor exceeds the
+	// int4 serial bound, so the restore must fail before any setval runs.
+	floors := map[string]int64{"cloud_users.id": 777, "cloud_sync_audit_log.id": 3000000000}
+	noRows := func(*BackupWriter) error { return nil }
+
+	if err := cs.RestoreBackup(ctx, BackupRestoreOptions{DryRun: true, SequenceFloors: floors}, noRows); !errors.Is(err, ErrBackupInvalidSequence) {
+		t.Errorf("dry-run error = %v, want %v", err, ErrBackupInvalidSequence)
+	}
+	err := cs.RestoreBackup(ctx, BackupRestoreOptions{SequenceFloors: floors}, noRows)
+	if !errors.Is(err, ErrBackupInvalidSequence) {
+		t.Fatalf("restore error = %v, want %v", err, ErrBackupInvalidSequence)
+	}
+	if !strings.Contains(err.Error(), "cloud_sync_audit_log.id") {
+		t.Errorf("error %q does not name the out-of-range sequence", err)
+	}
+	if av, ac := read(); av != bv || ac != bc {
+		t.Fatalf("failed restore moved cloud_users_id_seq: (%d,%v) -> (%d,%v)", bv, bc, av, ac)
 	}
 }
 

@@ -236,11 +236,12 @@ func canonicalBackupChunkRow(row []byte) ([]byte, error) {
 
 // BackupRestoreOptions controls RestoreBackup.
 type BackupRestoreOptions struct {
-	// DryRun validates every row inside the restore transaction and then
-	// rolls it back; sequences are not touched.
+	// DryRun validates every row and every sequence value inside the restore
+	// transaction and then rolls it back; sequences are not touched.
 	DryRun bool
 	// SequenceFloors holds source sequence values keyed "table.column". Each
-	// restored sequence continues after max(restored ids, floor).
+	// restored sequence continues after max(restored ids, floor, the target's
+	// own last issued value), so a restore never lowers a sequence.
 	SequenceFloors map[string]int64
 }
 
@@ -252,6 +253,14 @@ type BackupWriter struct {
 // RestoreBackup runs fn inside one transaction on an empty target, then
 // advances every serial sequence and commits. Any error, or DryRun, rolls the
 // whole restore back so the target is left unchanged.
+//
+// setval is not transactional: a rollback does not undo it. Safety therefore
+// comes from ordering. Every floor is checked against its sequence bounds
+// before any row is written, and the final value of every sequence is
+// computed and checked after all rows are in; only then, as the last step
+// before commit, do the setval calls run. Because each final value is at
+// least the target's own last issued value, a setval only ever raises a
+// sequence, so even a commit failure after them leaves gaps, never reuse.
 func (cs *CloudStore) RestoreBackup(ctx context.Context, opts BackupRestoreOptions, fn func(*BackupWriter) error) error {
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")
@@ -288,20 +297,25 @@ func (cs *CloudStore) RestoreBackup(ctx context.Context, opts BackupRestoreOptio
 			return fmt.Errorf("%w: table %s has rows", ErrBackupTargetNotEmpty, table)
 		}
 	}
+	// Reject an out-of-range floor before spending time on the rows.
+	if _, err := planBackupSequences(ctx, tx, opts.SequenceFloors); err != nil {
+		return err
+	}
 
 	if err := fn(&BackupWriter{tx: tx}); err != nil {
+		return err
+	}
+	plan, err := planBackupSequences(ctx, tx, opts.SequenceFloors)
+	if err != nil {
 		return err
 	}
 	if opts.DryRun {
 		return nil
 	}
-	// setval is not transactional, so sequences move only once every row is in.
-	for _, spec := range backupTableSpecs {
-		if spec.serial == "" {
-			continue
-		}
-		if err := advanceBackupSequence(ctx, tx, spec, opts.SequenceFloors[backupSequenceKey(spec)]); err != nil {
-			return err
+	// Last step before commit: every value in plan is already validated.
+	for _, step := range plan {
+		if _, err := tx.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence($1, $2), $3, true)`, step.spec.name, step.spec.serial, step.last); err != nil {
+			return fmt.Errorf("cloudstore: advance sequence %s: %w", backupSequenceKey(step.spec), err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -321,22 +335,50 @@ func isBackupSequenceKey(key string) bool {
 	return false
 }
 
-func advanceBackupSequence(ctx context.Context, tx *sql.Tx, spec backupTableSpec, floor int64) error {
-	var restoredMax int64
-	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(MAX(%s), 0) FROM %s`, spec.serial, spec.name)).Scan(&restoredMax); err != nil {
-		return fmt.Errorf("cloudstore: restored max %s: %w", backupSequenceKey(spec), err)
+// backupSequenceStep is one validated setval a restore will run.
+type backupSequenceStep struct {
+	spec backupTableSpec
+	last int64
+}
+
+// planBackupSequences computes the value every serial sequence must reach,
+// max(restored ids, floor, target last issued value), and checks each one
+// against the sequence bounds. It never changes a sequence. Sequences that
+// stay untouched (no rows, no floor, never used) need no step.
+func planBackupSequences(ctx context.Context, tx *sql.Tx, floors map[string]int64) ([]backupSequenceStep, error) {
+	var plan []backupSequenceStep
+	for _, spec := range backupTableSpecs {
+		if spec.serial == "" {
+			continue
+		}
+		key := backupSequenceKey(spec)
+		var minValue, maxValue, targetLast int64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT s.seqmin, s.seqmax, COALESCE(pg_sequence_last_value(s.seqrelid::regclass), 0)
+			FROM pg_sequence s
+			WHERE s.seqrelid = pg_get_serial_sequence($1, $2)::regclass`,
+			spec.name, spec.serial,
+		).Scan(&minValue, &maxValue, &targetLast); err != nil {
+			return nil, fmt.Errorf("cloudstore: read sequence %s: %w", key, err)
+		}
+		var restoredMax int64
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(MAX(%s), 0) FROM %s`, spec.serial, spec.name)).Scan(&restoredMax); err != nil {
+			return nil, fmt.Errorf("cloudstore: restored max %s: %w", key, err)
+		}
+		floor := floors[key]
+		if floor > 0 && (floor < minValue || floor > maxValue) {
+			return nil, fmt.Errorf("%w: sequence %q floor %d is outside its bounds %d..%d", ErrBackupInvalidSequence, key, floor, minValue, maxValue)
+		}
+		last := max(restoredMax, floor, targetLast)
+		if last == 0 || last == targetLast {
+			continue
+		}
+		if last < minValue || last > maxValue {
+			return nil, fmt.Errorf("%w: sequence %q value %d is outside its bounds %d..%d", ErrBackupInvalidSequence, key, last, minValue, maxValue)
+		}
+		plan = append(plan, backupSequenceStep{spec: spec, last: last})
 	}
-	last := max(restoredMax, floor)
-	var err error
-	if last > 0 {
-		_, err = tx.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence($1, $2), $3, true)`, spec.name, spec.serial, last)
-	} else {
-		_, err = tx.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence($1, $2), 1, false)`, spec.name, spec.serial)
-	}
-	if err != nil {
-		return fmt.Errorf("cloudstore: advance sequence %s: %w", backupSequenceKey(spec), err)
-	}
-	return nil
+	return plan, nil
 }
 
 // InsertRows inserts backup rows into table, keeping their original ids and

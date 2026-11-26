@@ -32,6 +32,10 @@ const (
 	tableMemberSuffix = ".jsonl"
 	mutationSeqKey    = "cloud_mutations.seq"
 
+	// DefaultMaxArchiveBytes caps the total uncompressed size of all archive
+	// members Import spools when ImportOptions.MaxArchiveBytes is zero.
+	DefaultMaxArchiveBytes int64 = 8 << 30
+
 	maxManifestBytes = 16 << 20
 	insertBatchRows  = 500
 	insertBatchBytes = 8 << 20
@@ -41,6 +45,7 @@ var (
 	ErrUnsupportedFormat = errors.New("cloudbackup: unsupported backup format")
 	ErrChecksumMismatch  = errors.New("cloudbackup: archive member checksum mismatch")
 	ErrInvalidArchive    = errors.New("cloudbackup: invalid backup archive")
+	ErrArchiveTooLarge   = errors.New("cloudbackup: backup archive exceeds the size limit")
 )
 
 // Source is the snapshot surface Export reads from.
@@ -65,6 +70,9 @@ type ImportOptions struct {
 	DryRun bool
 	// TempDir holds spooled members; empty uses the system temp directory.
 	TempDir string
+	// MaxArchiveBytes caps the total uncompressed size of every archive
+	// member, manifest included; zero uses DefaultMaxArchiveBytes.
+	MaxArchiveBytes int64
 }
 
 type TableSummary struct {
@@ -254,7 +262,11 @@ func Import(ctx context.Context, dst Target, r io.Reader, opts ImportOptions) (S
 	}
 	defer func() { _ = os.RemoveAll(spoolDir) }()
 
-	members, rawManifest, err := spoolArchive(r, spoolDir)
+	limit := opts.MaxArchiveBytes
+	if limit <= 0 {
+		limit = DefaultMaxArchiveBytes
+	}
+	members, rawManifest, err := spoolArchive(r, spoolDir, limit)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -286,7 +298,8 @@ func Import(ctx context.Context, dst Target, r io.Reader, opts ImportOptions) (S
 
 // spoolArchive stages every table member and returns the manifest bytes. It
 // reads the gzip stream to its end so a truncated trailer is detected too.
-func spoolArchive(r io.Reader, dir string) (map[string]spooledMember, []byte, error) {
+// The uncompressed bytes of all members together may not exceed limit.
+func spoolArchive(r io.Reader, dir string, limit int64) (map[string]spooledMember, []byte, error) {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidArchive, err)
@@ -295,6 +308,10 @@ func spoolArchive(r io.Reader, dir string) (map[string]spooledMember, []byte, er
 	tr := tar.NewReader(gz)
 	members := make(map[string]spooledMember)
 	var rawManifest []byte
+	remaining := limit
+	tooLarge := func(name string) error {
+		return fmt.Errorf("%w: uncompressed members exceed %d bytes at %q", ErrArchiveTooLarge, limit, name)
+	}
 	for {
 		header, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -309,14 +326,21 @@ func spoolArchive(r io.Reader, dir string) (map[string]spooledMember, []byte, er
 		if header.Typeflag != tar.TypeReg {
 			return nil, nil, fmt.Errorf("%w: member %q is not a regular file", ErrInvalidArchive, header.Name)
 		}
+		if header.Size > remaining {
+			return nil, nil, tooLarge(header.Name)
+		}
 		if header.Name == ManifestName {
-			rawManifest, err = io.ReadAll(io.LimitReader(tr, maxManifestBytes+1))
+			rawManifest, err = io.ReadAll(io.LimitReader(tr, min(maxManifestBytes, remaining)+1))
 			if err != nil {
 				return nil, nil, fmt.Errorf("%w: read %s: %v", ErrInvalidArchive, ManifestName, err)
 			}
 			if len(rawManifest) > maxManifestBytes {
 				return nil, nil, fmt.Errorf("%w: %s exceeds %d bytes", ErrInvalidArchive, ManifestName, maxManifestBytes)
 			}
+			if int64(len(rawManifest)) > remaining {
+				return nil, nil, tooLarge(header.Name)
+			}
+			remaining -= int64(len(rawManifest))
 			continue
 		}
 		if !isTableMember(header.Name) {
@@ -325,10 +349,14 @@ func spoolArchive(r io.Reader, dir string) (map[string]spooledMember, []byte, er
 		if _, duplicate := members[header.Name]; duplicate {
 			return nil, nil, fmt.Errorf("%w: duplicate member %q", ErrInvalidArchive, header.Name)
 		}
-		spooled, err := spoolMember(tr, dir, header.Name)
+		spooled, err := spoolMember(tr, dir, header.Name, remaining)
+		if errors.Is(err, errMemberOverLimit) {
+			return nil, nil, tooLarge(header.Name)
+		}
 		if err != nil {
 			return nil, nil, err
 		}
+		remaining -= spooled.size
 		members[header.Name] = spooled
 	}
 	if _, err := io.Copy(io.Discard, gz); err != nil {
@@ -347,16 +375,24 @@ func isTableMember(name string) bool {
 	return slices.ContainsFunc(cloudstore.BackupTables(), func(table string) bool { return tableMemberName(table) == name })
 }
 
-func spoolMember(r io.Reader, dir, name string) (spooledMember, error) {
+// errMemberOverLimit reports that a member holds more than the bytes left.
+var errMemberOverLimit = errors.New("cloudbackup: member exceeds the remaining size budget")
+
+// spoolMember copies at most limit bytes of one member to a temp file in dir;
+// a longer member fails with errMemberOverLimit. The caller removes dir.
+func spoolMember(r io.Reader, dir, name string, limit int64) (spooledMember, error) {
 	file, err := os.CreateTemp(dir, "member-*.jsonl")
 	if err != nil {
 		return spooledMember{}, fmt.Errorf("cloudbackup: spool %s: %w", name, err)
 	}
 	defer func() { _ = file.Close() }()
 	hash := sha256.New()
-	size, err := io.Copy(io.MultiWriter(file, hash), r)
+	size, err := io.Copy(io.MultiWriter(file, hash), io.LimitReader(r, limit+1))
 	if err != nil {
 		return spooledMember{}, fmt.Errorf("%w: read %s: %v", ErrInvalidArchive, name, err)
+	}
+	if size > limit {
+		return spooledMember{}, errMemberOverLimit
 	}
 	if err := file.Close(); err != nil {
 		return spooledMember{}, fmt.Errorf("cloudbackup: spool %s: %w", name, err)
