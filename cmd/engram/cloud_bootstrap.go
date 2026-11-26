@@ -444,6 +444,11 @@ func parseCloudBootstrapRecoverTokenArgs(args []string) (cloudBootstrapRecoverTo
 				return out, fmt.Errorf("--name requires a non-empty value")
 			}
 		case "--principal":
+			// The selector chooses who receives an admin credential, so a
+			// repeated flag is refused instead of silently keeping the last one.
+			if out.principal != "" {
+				return out, fmt.Errorf("--principal may be given only once")
+			}
 			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 				return out, fmt.Errorf("--principal requires a value")
 			}

@@ -251,3 +251,17 @@ func TestCloudBootstrapRecoverTokenPrincipalRefusals(t *testing.T) {
 		})
 	}
 }
+
+func TestCloudBootstrapRecoverTokenRejectsRepeatedPrincipal(t *testing.T) {
+	if _, err := parseCloudBootstrapRecoverTokenArgs([]string{"--principal", "restored-first", "--principal", "restored-second"}); err == nil || !strings.Contains(err.Error(), "--principal") {
+		t.Fatalf("repeated --principal must be rejected by the parser, err=%v", err)
+	}
+	d := openRecoverPrincipalDB(t)
+	_, stderr, code := runRecoverToken(t, "--principal", "restored-first", "--principal", "restored-second")
+	if code != 1 || !strings.Contains(stderr, "--principal") {
+		t.Fatalf("repeated --principal must be refused, code=%d stderr=%q", code, stderr)
+	}
+	if got := d.count(t, `SELECT COUNT(*) FROM cloud_principal_tokens`); got != 0 {
+		t.Fatalf("repeated --principal wrote %d token rows, want 0", got)
+	}
+}
