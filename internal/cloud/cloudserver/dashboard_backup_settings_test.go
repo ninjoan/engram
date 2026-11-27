@@ -612,7 +612,7 @@ func TestDashboardSaveBackupDestinationRendersValidationErrors(t *testing.T) {
 	f.settings.putDestinationErr = fmt.Errorf("%w: bucket must be 3-63 lowercase letters", cloudstore.ErrInvalidBackupDestination)
 	rec := doBackupRequest(f.srv, backupRequest{method: http.MethodPost, path: backupDestinationPath, form: validBackupDestinationForm, cookie: f.cookie})
 	body := rec.Body.String()
-	if rec.Code != http.StatusBadRequest || !strings.Contains(body, "bucket must be 3-63 lowercase letters") || !strings.Contains(body, "danger-note") {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(body, "bucket must be 3-63 lowercase letters") || !strings.Contains(body, "alert alert-danger") {
 		t.Fatalf("expected 400 with the validation reason, got %d body=%q", rec.Code, body)
 	}
 	if strings.Contains(body, testBackupSecret) || strings.Contains(body, testBackupAccessKeyID) || strings.Contains(body, "cloudstore:") {

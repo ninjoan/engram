@@ -22,9 +22,9 @@ templ AdminBackupsPage(v BackupsPageView) {
 			</div>
 		</div>
 		@adminNav("backups")
-		if v.Notice.Kind != "" {
-			<div class={ backupNoticeClass(v.Notice.Kind) } role="status">
-				<p>{ v.Notice.Message }</p>
+		if n := v.pageNotice(); n.Kind != "" {
+			<div class={ backupNoticeClass(n.Kind) } role="status">
+				<p>{ n.Message }</p>
 			</div>
 		}
 		<div class="data-frame">
@@ -81,7 +81,7 @@ templ AdminBackupsPage(v BackupsPageView) {
 // backupScheduledSection renders the destination, schedule, "Back up now"
 // and run history according to the settings state.
 templ backupScheduledSection(v BackupsPageView) {
-	<p class="muted">Engram uploads the same archive to an S3-compatible bucket (Cloudflare R2, MinIO, AWS S3) on the weekdays and time you choose. Engram never deletes uploaded backups: configure expiration with the bucket's lifecycle rules.</p>
+	<p class="backup-lead">Engram uploads the same archive to one S3-compatible bucket on the weekdays and time you choose. Engram never deletes uploaded backups: set expiration with the bucket's lifecycle rules.</p>
 	switch v.Settings {
 		case BackupSettingsNotWired:
 			@EmptyState("Not Available", "This server has no backup settings store. Download a backup above or run engram cloud backup export on the server.")
@@ -103,45 +103,215 @@ templ backupScheduledSection(v BackupsPageView) {
 	}
 }
 
+// backupDestinationBlock renders the destination: a summary of the stored
+// destination (provider derived from its endpoint host, masked access key
+// id) with the form collapsed behind "Change destination", or the provider
+// tiles and grouped form when none is stored. Forms render only for managed
+// admins with the backup key set.
 templ backupDestinationBlock(v BackupsPageView) {
-	<div class="data-frame">
-		<p class="section-kicker">DESTINATION</p>
+	<section class="data-frame backup-destination" aria-labelledby="backup-destination-title">
+		<p class="section-kicker" id="backup-destination-title">DESTINATION</p>
 		if v.Destination.Configured {
-			<table>
-				<tbody>
-					<tr><th>Endpoint</th><td><code>{ v.Destination.Endpoint }</code></td></tr>
-					<tr><th>Region</th><td>{ v.Destination.Region }</td></tr>
-					<tr><th>Bucket</th><td><code>{ v.Destination.Bucket }</code></td></tr>
-					<tr><th>Prefix</th><td>{ emptyDash(v.Destination.Prefix) }</td></tr>
-					<tr><th>Access key id</th><td><code>{ v.Destination.AccessKeyIDHint }</code></td></tr>
-					<tr><th>Updated</th><td>{ formatTimeValue(v.Destination.UpdatedAt) }</td></tr>
-				</tbody>
-			</table>
+			@backupDestinationSummary(v)
 		} else {
-			<p class="muted">No destination is configured.</p>
+			<div class="backup-dest-head">
+				<div>
+					<h4>Where should Engram send backups?</h4>
+					<p class="muted">No destination is configured. Nothing is uploaded off this server yet; <strong>Download backup</strong> above still works.</p>
+				</div>
+				@StatusBadge("Not configured", "muted")
+			</div>
+		}
+		if n := v.destinationNotice(); n.Kind != "" {
+			<div class={ backupAlertClass(n.Kind) } role="status">
+				<p>
+					if n.Title != "" {
+						<strong>{ n.Title }</strong>
+					}
+					{ n.Message }
+				</p>
+			</div>
 		}
 		if v.settingsFormsVisible() {
-			<form method="post" action="/dashboard/admin/backups/destination" class="backup-settings-form" autocomplete="off">
-				<label>Endpoint <input type="text" name="endpoint" value={ v.Destination.Endpoint } placeholder="https://<account>.r2.cloudflarestorage.com" required/></label>
-				<label>Region <input type="text" name="region" value={ backupDestinationRegionValue(v.Destination) } placeholder="auto" required/></label>
-				<label>Bucket <input type="text" name="bucket" value={ v.Destination.Bucket } placeholder="engram-backups" required/></label>
-				<label>Prefix <input type="text" name="prefix" value={ v.Destination.Prefix } placeholder="engram/prod/"/></label>
-				<label>Access key id <input type="text" name="access_key_id" value="" autocomplete="off" required/></label>
-				<label>Secret access key <input type="password" name="secret_access_key" value="" autocomplete="new-password" required/></label>
-				<p class="muted">Both credentials are required on every save: they are encrypted together with the endpoint, region, bucket and prefix they authorize, and are never shown again.</p>
-				<button type="submit">Save destination</button>
-			</form>
 			if v.Destination.Configured {
-				<div class="managed-user-form backup-actions">
-					<form method="post" action="/dashboard/admin/backups/destination/test" class="switch-form">
-						<button type="submit">Test connection</button>
-					</form>
-					<form method="post" action="/dashboard/admin/backups/destination/remove" class="switch-form">
-						<button type="submit" class="secondary">Remove destination</button>
-					</form>
-				</div>
+				<details class="backup-change" open?={ v.destinationFormOpen() }>
+					<summary>Change destination</summary>
+					<p class="hint">The same provider tiles and grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save.</p>
+					@backupDestinationForm(v)
+				</details>
+			} else {
+				@backupDestinationForm(v)
 			}
 		}
+	</section>
+}
+
+// backupDestinationSummary shows the stored destination without any
+// credential: only the masked access key id hint.
+templ backupDestinationSummary(v BackupsPageView) {
+	<div class="backup-summary">
+		@backupProviderMark(v.configuredBackupProvider())
+		<div class="backup-summary-body">
+			<h4 class="backup-summary-title">{ v.configuredBackupProvider().Summary } @StatusBadge("Configured", "success")</h4>
+			<p class="backup-summary-path">{ v.Destination.Bucket }/{ backupPathPrefix(v.Destination.Prefix) }</p>
+			<dl class="backup-facts">
+				<div><dt>Endpoint</dt><dd><code>{ v.Destination.Endpoint }</code></dd></div>
+				<div><dt>Region</dt><dd><code>{ v.Destination.Region }</code></dd></div>
+				<div><dt>Access key id</dt><dd><code>{ v.Destination.AccessKeyIDHint }</code></dd></div>
+				<div><dt>Updated</dt><dd>{ formatTimeValue(v.Destination.UpdatedAt) }</dd></div>
+			</dl>
+		</div>
+		if v.settingsFormsVisible() {
+			<div class="backup-summary-actions">
+				<form method="post" action="/dashboard/admin/backups/destination/test" class="switch-form">
+					<button type="submit">Test connection</button>
+				</form>
+				<form method="post" action="/dashboard/admin/backups/destination/remove" class="switch-form">
+					<button type="submit" class="secondary backup-danger-button">Remove destination</button>
+				</form>
+			</div>
+		}
+	</div>
+}
+
+// backupDestinationForm is a plain POST form: the provider tiles are radios
+// that switch the guidance with CSS only and are never stored; the server
+// reads endpoint, region, bucket, prefix and both credentials.
+templ backupDestinationForm(v BackupsPageView) {
+	<form method="post" action="/dashboard/admin/backups/destination" class="backup-provider-form" autocomplete="off">
+		if v.DestinationForm.Submitted {
+			<div class="alert alert-danger" role="alert">
+				<p>
+					<strong>Destination not saved.</strong>
+					if reason := v.destinationErrorUnplaced(); reason != "" {
+						{ reason + "." }
+					} else {
+						Fix the field marked below.
+					}
+					Your keys were not stored: paste both again.
+				</p>
+			</div>
+		}
+		<fieldset class="backup-providers">
+			<legend><span class="backup-step" aria-hidden="true">1</span>Storage provider <span class="muted">shows the right endpoint format; not stored</span></legend>
+			<div class="backup-tiles">
+				for _, p := range backupProviders {
+					<label class="backup-tile">
+						<input type="radio" name="provider" value={ p.ID } id={ "backup-provider-" + p.ID } checked?={ v.selectedBackupProvider() == p.ID }/>
+						@backupProviderMark(p)
+						<span class="backup-tile-name">{ p.Name }</span>
+						<span class="backup-tile-pattern">{ p.Pattern }</span>
+						<svg class="backup-tile-check" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+					</label>
+				}
+			</div>
+			@backupProviderGuide()
+		</fieldset>
+		<div class="backup-form-body">
+			<div class="backup-groups">
+				<fieldset class="backup-group">
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">2</span>Connection</legend>
+					<p class="hint backup-group-hint">How Engram reaches the storage service.</p>
+					<div class="backup-group-fields">
+						<div class="backup-field">
+							<label for="backup-endpoint">Endpoint</label>
+							<input type="text" id="backup-endpoint" name="endpoint" value={ v.destinationFormValue("endpoint") } placeholder={ v.placeholderBackupProvider().EndpointPlaceholder } class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("endpoint", "backup-endpoint", true)... }/>
+							@backupFieldError(v.destinationFieldError("endpoint"), "backup-endpoint")
+							<span class="hint" id="backup-endpoint-hint">Origin only, starting with <code>https://</code>; plain <code>http://</code> only for localhost and loopback addresses.</span>
+						</div>
+						<div class="backup-field">
+							<label for="backup-region">Region</label>
+							<input type="text" id="backup-region" name="region" value={ v.destinationFormValue("region") } placeholder={ v.placeholderBackupProvider().RegionPlaceholder } list="backup-region-suggestions" class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("region", "backup-region", true)... }/>
+							<datalist id="backup-region-suggestions">
+								for _, region := range backupRegionSuggestions {
+									<option value={ region }></option>
+								}
+							</datalist>
+							@backupFieldError(v.destinationFieldError("region"), "backup-region")
+							<span class="hint" id="backup-region-hint">Cloudflare R2 uses <code>auto</code>; other providers use the bucket's region.</span>
+						</div>
+					</div>
+				</fieldset>
+				<fieldset class="backup-group">
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">3</span>Location</legend>
+					<p class="hint backup-group-hint">Where the archives land.</p>
+					<div class="backup-group-fields even">
+						<div class="backup-field">
+							<label for="backup-bucket">Bucket</label>
+							<input type="text" id="backup-bucket" name="bucket" value={ v.destinationFormValue("bucket") } placeholder="engram-backups" class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("bucket", "backup-bucket", true)... }/>
+							@backupFieldError(v.destinationFieldError("bucket"), "backup-bucket")
+							<span class="hint" id="backup-bucket-hint">3–63 lowercase letters, digits, dots or hyphens.</span>
+						</div>
+						<div class="backup-field">
+							<label for="backup-prefix">Prefix <span class="muted">(optional)</span></label>
+							<input type="text" id="backup-prefix" name="prefix" value={ v.destinationFormValue("prefix") } placeholder="engram/prod/" class="mono-input" spellcheck="false" { v.destinationFieldAttrs("prefix", "backup-prefix", true)... }/>
+							@backupFieldError(v.destinationFieldError("prefix"), "backup-prefix")
+							<span class="hint" id="backup-prefix-hint">A folder inside the bucket. No leading <code>/</code>.</span>
+						</div>
+					</div>
+				</fieldset>
+				<fieldset class="backup-group">
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">4</span>Credentials</legend>
+					<p class="hint backup-group-hint">Paste both, every time you save.</p>
+					<div class="backup-group-fields even">
+						<div class="backup-field">
+							<label for="backup-access-key-id">Access key id</label>
+							<input type="text" id="backup-access-key-id" name="access_key_id" value="" autocomplete="off" spellcheck="false" placeholder="Paste from your provider" class="mono-input" required { v.destinationFieldAttrs("access_key_id", "backup-access-key-id", false)... }/>
+							@backupFieldError(v.destinationFieldError("access_key_id"), "backup-access-key-id")
+						</div>
+						<div class="backup-field">
+							<label for="backup-secret-access-key">Secret access key</label>
+							<input type="password" id="backup-secret-access-key" name="secret_access_key" value="" autocomplete="new-password" placeholder="Paste from your provider" required { v.destinationFieldAttrs("secret_access_key", "backup-secret-access-key", false)... }/>
+							@backupFieldError(v.destinationFieldError("secret_access_key"), "backup-secret-access-key")
+						</div>
+					</div>
+				</fieldset>
+			</div>
+			<aside class="backup-aside" aria-label="What you are saving">
+				<div class="backup-path-preview">
+					<p class="section-kicker">Backups will be saved as</p>
+					<p class="backup-path"><span class="backup-path-bucket">{ backupPathBucket(v.destinationFormValue("bucket")) }</span>/<span class="backup-path-prefix">{ backupPathPrefix(v.destinationFormValue("prefix")) }</span><span class="backup-path-file">{ "engram-cloud-backup-<UTC timestamp>-run<id>.tar.gz" }</span></p>
+					<p class="hint">One object per run: UTC time plus run number, so runs never overwrite each other.</p>
+				</div>
+				<div class="backup-why-keys">
+					<h5><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"></rect><path d="M5.5 7V5a2.5 2.5 0 015 0v2" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg>Why paste both keys again?</h5>
+					<p>Engram encrypts your keys together with this exact endpoint, region, bucket and prefix, and never shows them again, not even to admins.</p>
+					<p>So every save needs both keys, even if you only changed the prefix. Keep them in your password manager.</p>
+				</div>
+			</aside>
+		</div>
+		<div class="backup-submit-row">
+			<p class="muted">Saving stores the destination; it does not upload anything. Use <strong>Test connection</strong> right after to check the keys.</p>
+			<button type="submit">Save destination</button>
+		</div>
+	</form>
+}
+
+// backupFieldError renders a field's validation reason, referenced by the
+// field's aria-describedby.
+templ backupFieldError(reason string, id string) {
+	if reason != "" {
+		<span class="field-error" id={ id + "-error" }>{ reason }</span>
+	}
+}
+
+// backupProviderMark is a text monogram, not a provider logo.
+templ backupProviderMark(p backupProvider) {
+	<svg class={ "backup-mark backup-mark-" + p.ID } width="40" height="40" viewBox="0 0 40 40" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="39" height="39" rx="10"></rect><text x="20" y="25" text-anchor="middle">{ p.Mark }</text></svg>
+}
+
+// backupProviderGuide holds the help for every tile; CSS shows the one of
+// the checked tile, so it works without JavaScript.
+templ backupProviderGuide() {
+	<div class="backup-provider-guide" aria-live="polite">
+		<div data-provider-guide="none"><p>Choose a provider to see where to find its endpoint, region and keys. You can also skip this and fill the fields directly.</p></div>
+		<div data-provider-guide="r2"><p><strong>Cloudflare R2.</strong> Your Account ID is on <em>R2 › Overview</em>. Create an R2 API token with <em>Object Read &amp; Write</em> scoped to this bucket. Region is always <code>auto</code>. Set expiration under the bucket's <em>Settings › Object lifecycle rules</em>.</p></div>
+		<div data-provider-guide="aws"><p><strong>Amazon S3.</strong> Use the bucket's own region, for example <code>https://s3.us-east-1.amazonaws.com</code> with region <code>us-east-1</code>. The access key needs <code>s3:PutObject</code> and <code>s3:ListBucket</code> on this bucket.</p></div>
+		<div data-provider-guide="b2"><p><strong>Backblaze B2.</strong> Copy the region from the bucket's S3 endpoint, for example <code>https://s3.us-west-004.backblazeb2.com</code> → region <code>us-west-004</code>. Create an application key restricted to this bucket.</p></div>
+		<div data-provider-guide="wasabi"><p><strong>Wasabi.</strong> Use the bucket's region endpoint, for example <code>https://s3.eu-central-1.wasabisys.com</code> with region <code>eu-central-1</code>.</p></div>
+		<div data-provider-guide="do"><p><strong>DigitalOcean Spaces.</strong> The endpoint is the datacenter, for example <code>https://nyc3.digitaloceanspaces.com</code> with region <code>nyc3</code>. Create a Spaces access key.</p></div>
+		<div data-provider-guide="minio"><p><strong>MinIO or another server you run.</strong> Use its origin, for example <code>https://minio.internal.example.com:9000</code>. Plain <code>http://</code> is accepted only for <code>localhost</code> and loopback addresses such as <code>127.0.0.1</code>. MinIO's default region is <code>us-east-1</code>.</p></div>
+		<div data-provider-guide="other"><p><strong>Other S3-compatible storage.</strong> Any service that accepts S3 Signature V4 requests over https. Use the region your provider documents, or <code>auto</code> when it has none.</p></div>
 	</div>
 }
 

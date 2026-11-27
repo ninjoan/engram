@@ -101,16 +101,16 @@ const (
 // backupNotices maps the notice query parameter to a fixed message, so a
 // crafted URL can only select one of these.
 var backupNotices = map[string]dashboard.BackupsNotice{
-	"destination-saved":   {Kind: "success", Message: "Backup destination saved."},
-	"destination-removed": {Kind: "success", Message: "Backup destination removed."},
+	"destination-saved":   {Kind: "success", Message: "Backup destination saved.", Destination: true},
+	"destination-removed": {Kind: "success", Message: "Backup destination removed.", Destination: true},
 	"schedule-saved":      {Kind: "success", Message: "Backup schedule saved."},
-	"test-ok":             {Kind: "success", Message: "Connection test passed: the bucket is reachable with the stored credentials."},
-	"test-auth":           {Kind: "danger", Message: "Connection test failed: the destination rejected the credentials (authentication or authorization failed)."},
-	"test-bucket":         {Kind: "danger", Message: "Connection test failed: the bucket was not found at this endpoint."},
-	"test-network":        {Kind: "danger", Message: "Connection test failed: the endpoint could not be reached (network error or timeout)."},
-	"test-error":          {Kind: "danger", Message: "Connection test failed: the destination returned an unexpected response."},
-	"test-key":            {Kind: "danger", Message: "Connection test failed: the stored credentials cannot be opened with the current ENGRAM_CLOUD_BACKUP_KEY. Save the destination again."},
-	"test-none":           {Kind: "danger", Message: "Connection test failed: no backup destination is configured."},
+	"test-ok":             {Kind: "success", Title: "Connected.", Message: "Connection test passed: the bucket is reachable with the stored credentials.", Destination: true},
+	"test-auth":           {Kind: "danger", Title: "Keys rejected.", Message: "Connection test failed: the destination rejected the credentials (authentication or authorization failed).", Destination: true},
+	"test-bucket":         {Kind: "danger", Title: "Bucket not found.", Message: "Connection test failed: the bucket was not found at this endpoint.", Destination: true},
+	"test-network":        {Kind: "danger", Title: "Endpoint unreachable.", Message: "Connection test failed: the endpoint could not be reached (network error or timeout).", Destination: true},
+	"test-error":          {Kind: "danger", Title: "Unexpected response.", Message: "Connection test failed: the destination returned an unexpected response.", Destination: true},
+	"test-key":            {Kind: "danger", Title: "Credentials cannot be opened.", Message: "Connection test failed: the stored credentials cannot be opened with the current ENGRAM_CLOUD_BACKUP_KEY. Save the destination again.", Destination: true},
+	"test-none":           {Kind: "danger", Title: "No destination.", Message: "Connection test failed: no backup destination is configured.", Destination: true},
 	"run-started":         {Kind: "success", Message: "Backup started. Its result appears in the run history."},
 	"run-busy":            {Kind: "danger", Message: "A backup is already running; wait for it to finish."},
 	"run-failed":          {Kind: "danger", Message: "The backup could not be started. Check the server log."},
@@ -143,8 +143,15 @@ func (s *CloudServer) handleDashboardBackupsPage(w http.ResponseWriter, r *http.
 // renderBackupsPage renders the page with status and notice. Unreadable
 // settings turn a 200 into 502; the download section still renders.
 func (s *CloudServer) renderBackupsPage(w http.ResponseWriter, r *http.Request, status int, notice dashboard.BackupsNotice) {
+	s.renderBackupsPageWithForm(w, r, status, notice, dashboard.BackupDestinationForm{})
+}
+
+// renderBackupsPageWithForm renders the page and re-renders a refused
+// destination save from form, which never carries a credential.
+func (s *CloudServer) renderBackupsPageWithForm(w http.ResponseWriter, r *http.Request, status int, notice dashboard.BackupsNotice, form dashboard.BackupDestinationForm) {
 	view := s.backupsPageView(r)
 	view.Notice = notice
+	view.DestinationForm = form
 	if view.Settings == dashboard.BackupSettingsUnavailable && status == http.StatusOK {
 		status = http.StatusBadGateway
 	}
@@ -248,11 +255,52 @@ func (s *CloudServer) handleDashboardSaveBackupDestination(w http.ResponseWriter
 		redirectDashboardAdmin(w, r, backupsPageURL+"?notice=destination-saved")
 	case errors.Is(err, cloudstore.ErrInvalidBackupDestination):
 		// The reasons are fixed strings that never echo the submitted values.
-		s.renderBackupsPage(w, r, http.StatusBadRequest, dashboard.BackupsNotice{Kind: "danger", Message: "Destination not saved: " + backupValidationReason(err, cloudstore.ErrInvalidBackupDestination) + "."})
+		// The form re-renders the submitted non-secret fields, marks the
+		// field the reason is about and leaves both credentials empty.
+		reason := backupValidationReason(err, cloudstore.ErrInvalidBackupDestination)
+		form := dashboard.BackupDestinationForm{
+			Submitted: true,
+			Provider:  r.PostForm.Get("provider"),
+			Endpoint:  backupEchoableEndpoint(params.Endpoint),
+			Region:    params.Region,
+			Bucket:    params.Bucket,
+			Prefix:    params.Prefix,
+			Field:     backupDestinationInvalidField(reason),
+			Error:     reason,
+		}
+		s.renderBackupsPageWithForm(w, r, http.StatusBadRequest, dashboard.BackupsNotice{Kind: "danger", Message: "Destination not saved: " + reason + ".", Destination: true}, form)
 	default:
 		log.Printf("[engram-cloud] save backup destination failed: actor=%q: %v", actor.ID, err)
 		http.Error(w, "save backup destination failed", http.StatusInternalServerError)
 	}
+}
+
+// backupDestinationInvalidField maps a destination validation reason to the
+// form field it is about; "" when it names none.
+func backupDestinationInvalidField(reason string) string {
+	for _, field := range []struct{ prefix, name string }{
+		{"endpoint ", "endpoint"},
+		{"region ", "region"},
+		{"bucket ", "bucket"},
+		{"prefix ", "prefix"},
+		{"access key id ", "access_key_id"},
+		{"secret access key ", "secret_access_key"},
+	} {
+		if strings.HasPrefix(reason, field.prefix) {
+			return field.name
+		}
+	}
+	return ""
+}
+
+// backupEchoableEndpoint is the submitted endpoint as the refused form may
+// show it: an endpoint carrying userinfo ("https://key:secret@host") may
+// hold a credential, so it is never echoed.
+func backupEchoableEndpoint(endpoint string) string {
+	if strings.Contains(endpoint, "@") {
+		return ""
+	}
+	return endpoint
 }
 
 // handleDashboardTestBackupDestination handles POST
