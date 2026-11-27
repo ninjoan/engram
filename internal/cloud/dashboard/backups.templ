@@ -622,29 +622,61 @@ templ backupScheduleBlock(v BackupsPageView) {
 		</p>
 		<p>Next run: <strong>{ formatBackupNextRun(v.NextRun, v.Schedule.Timezone) }</strong></p>
 		if v.scheduleFormVisible() {
-			<form method="post" action="/dashboard/admin/backups/schedule" class="backup-settings-form">
+			<form method="post" action="/dashboard/admin/backups/schedule" class="backup-settings-form backup-schedule-form">
 				<fieldset class="weekday-picker">
 					<legend>Weekdays</legend>
 					for _, day := range backupWeekdayOptions(v.Schedule.Weekdays) {
 						<label><input type="checkbox" name="weekday" value={ day.Value } checked?={ day.Checked }/> { day.Label }</label>
 					}
 				</fieldset>
-				<label>Time (24h) <input type="time" name="time" value={ v.Schedule.TimeOfDay } required/></label>
-				<label>Time zone <input type="text" name="timezone" value={ v.Schedule.Timezone } placeholder="UTC" required/></label>
-				<p class="muted">An IANA time zone such as <code>UTC</code>, <code>America/Lima</code> or <code>Europe/Madrid</code>.</p>
-				<label><input type="checkbox" name="enabled" value="on" checked?={ v.Schedule.Enabled }/> Enabled</label>
-				<button type="submit">Save schedule</button>
+				<div class="backup-field">
+					<label for="backup-schedule-time">Time (24h)</label>
+					<input type="time" id="backup-schedule-time" name="time" value={ v.Schedule.TimeOfDay } required { v.scheduleFieldAttrs("time", "backup-schedule-time", false)... }/>
+					@backupFieldError(v.scheduleFieldError("time"), "backup-schedule-time")
+				</div>
+				<div class="backup-field">
+					<label for="backup-schedule-timezone">Time zone</label>
+					<select id="backup-schedule-timezone" name="timezone" required { v.scheduleFieldAttrs("timezone", "backup-schedule-timezone", true)... }>
+						for _, group := range v.timezoneGroups() {
+							if group.Region == "" {
+								for _, option := range group.Options {
+									@backupTimezoneOptionTag(option)
+								}
+							} else {
+								<optgroup label={ group.Region }>
+									for _, option := range group.Options {
+										@backupTimezoneOptionTag(option)
+									}
+								</optgroup>
+							}
+						}
+					</select>
+					@backupFieldError(v.scheduleFieldError("timezone"), "backup-schedule-timezone")
+					<span class="hint" id="backup-schedule-timezone-hint">Offsets shown are today's; runs follow the zone's daylight-saving changes. With the list focused, type a region such as <code>Europe/</code> to jump to it.</span>
+				</div>
+				<label class="backup-schedule-enabled"><input type="checkbox" name="enabled" value="on" checked?={ v.Schedule.Enabled }/> Enabled</label>
+				<div class="backup-submit-row">
+					<p class="muted">Saving changes when backups run; it does not upload anything.</p>
+					<button type="submit">Save schedule</button>
+				</div>
 			</form>
 		} else if v.settingsFormsVisible() {
 			<p class="muted">Configure a destination above before scheduling backups.</p>
 		}
 		if v.CanRunNow {
-			<form method="post" action="/dashboard/admin/backups/run" class="managed-user-form">
-				<button type="submit">Back up now</button>
-			</form>
-			<p class="muted">Starts one upload to the destination now; it is recorded as <code>backup.run.manual</code> and appears in the history below.</p>
+			<div class="backup-run-now">
+				<form method="post" action="/dashboard/admin/backups/run">
+					<button type="submit" class="secondary">Back up now</button>
+				</form>
+				<p class="muted">Starts one upload to the destination now; it is recorded as <code>backup.run.manual</code> and appears in the history below.</p>
+			</div>
 		}
 	</div>
+}
+
+// backupTimezoneOptionTag is one option of the schedule's time zone select.
+templ backupTimezoneOptionTag(option backupTimezoneOption) {
+	<option value={ option.Value } selected?={ option.Selected }>{ option.Label }</option>
 }
 
 templ backupRunHistory(v BackupsPageView) {

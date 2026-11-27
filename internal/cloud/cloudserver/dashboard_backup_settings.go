@@ -163,9 +163,14 @@ func (s *CloudServer) renderBackupsPageWithForm(w http.ResponseWriter, r *http.R
 // the result of a destination check; neither carries a credential.
 func (s *CloudServer) renderBackupsPageWithCheck(w http.ResponseWriter, r *http.Request, status int, notice dashboard.BackupsNotice, form dashboard.BackupDestinationForm, check dashboard.BackupDestinationCheck) {
 	view := s.backupsPageView(r)
-	view.Notice = notice
 	view.DestinationForm = form
 	view.DestinationCheck = check
+	s.renderBackupsPageView(w, r, status, view, notice)
+}
+
+// renderBackupsPageView renders view with status and notice.
+func (s *CloudServer) renderBackupsPageView(w http.ResponseWriter, r *http.Request, status int, view dashboard.BackupsPageView, notice dashboard.BackupsNotice) {
+	view.Notice = notice
 	if view.Settings == dashboard.BackupSettingsUnavailable && status == http.StatusOK {
 		status = http.StatusBadGateway
 	}
@@ -524,13 +529,28 @@ func (s *CloudServer) handleDashboardSaveBackupSchedule(w http.ResponseWriter, r
 	case err == nil:
 		redirectDashboardAdmin(w, r, backupsPageURL+"?notice=schedule-saved")
 	case errors.Is(err, cloudstore.ErrInvalidBackupSchedule):
-		s.renderBackupsPage(w, r, http.StatusBadRequest, dashboard.BackupsNotice{Kind: "danger", Message: "Schedule not saved: " + backupValidationReason(err, cloudstore.ErrInvalidBackupSchedule) + "."})
+		reason := backupValidationReason(err, cloudstore.ErrInvalidBackupSchedule)
+		view := s.backupsPageView(r)
+		view.ScheduleForm = dashboard.BackupScheduleForm{Field: backupScheduleInvalidField(reason), Error: reason}
+		s.renderBackupsPageView(w, r, http.StatusBadRequest, view, dashboard.BackupsNotice{Kind: "danger", Message: "Schedule not saved: " + reason + "."})
 	case errors.Is(err, cloudstore.ErrBackupDestinationNotConfigured):
 		s.renderBackupsPage(w, r, http.StatusConflict, dashboard.BackupsNotice{Kind: "danger", Message: "Schedule not saved: Configure a backup destination before enabling the schedule."})
 	default:
 		log.Printf("[engram-cloud] save backup schedule failed: actor=%q: %v", actor.ID, err)
 		http.Error(w, "save backup schedule failed", http.StatusInternalServerError)
 	}
+}
+
+// backupScheduleInvalidField maps a schedule validation reason to the form
+// field it is about; "" when it names none (the weekdays).
+func backupScheduleInvalidField(reason string) string {
+	switch {
+	case strings.HasPrefix(reason, "time zone "):
+		return "timezone"
+	case strings.HasPrefix(reason, "time "):
+		return "time"
+	}
+	return ""
 }
 
 // parseBackupWeekdays maps "mon".."sun" to weekdays. An unknown value maps to

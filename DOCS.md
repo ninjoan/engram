@@ -1294,7 +1294,7 @@ A managed admin configures off-host backups on **Admin → Backups**:
    - **■ Locked**: `ENGRAM_CLOUD_BACKUP_KEY` is not set, so the saved keys cannot be tested or used.
 
    The status comes from the newest `backup.destination.test` audit event recorded after the destination's last save. The card also shows the **Last upload** (the most recently finished successful run: time, size and object key, or "None yet") and, when a run failed after it (or no run succeeded yet), the **Last failure** with its scrubbed error. Rendering the card never opens the stored credentials. Legacy admin sessions see the same card without **Test connection** or **Change destination**.
-3. **Schedule**: weekdays, a 24-hour time and an IANA time zone (for example Monday–Friday 03:00 `America/Lima`). The page shows the next run in that zone and in UTC. A time skipped by a daylight-saving change runs once at the moment the clocks jump; a repeated time runs once. The schedule can be enabled only while a destination exists.
+3. **Schedule**: weekdays, a 24-hour time and an IANA time zone (for example Monday–Friday 03:00 `America/Lima`). The time zone is picked from a list grouped by region, with UTC first and each zone's current UTC offset. The page shows the next run in that zone and in UTC. A time skipped by a daylight-saving change runs once at the moment the clocks jump; a repeated time runs once. The schedule can be enabled only while a destination exists.
 4. **Back up now** starts a manual upload right away (shown only to managed admins while a destination exists and the server runs the backup runner).
 5. **Recent runs** lists the last 20 uploads (trigger, scheduled time, start, finish, status, size, object key, error).
 

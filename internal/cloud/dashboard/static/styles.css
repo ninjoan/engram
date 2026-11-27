@@ -1694,6 +1694,87 @@ td:not(:first-child) p,
 	margin-top: 0.85rem;
 }
 
+/* Schedule: the time zone is a native <select> (optgroups per region, the
+   browser's typeahead to jump); "Save schedule" is the form's primary
+   submit in its actions row, and "Back up now" is a separate secondary
+   action with its own helper text. */
+
+.backup-schedule-form {
+	align-items: start;
+}
+
+.backup-schedule-form select {
+	margin: 0;
+}
+
+.backup-schedule-form .hint {
+	margin: 0;
+	color: var(--engram-muted);
+	font-size: 0.84rem;
+	line-height: 1.5;
+}
+
+.backup-schedule-form .field-error {
+	display: block;
+	color: var(--engram-danger);
+	font-size: 0.84rem;
+	line-height: 1.5;
+}
+
+.backup-schedule-form > .backup-schedule-enabled {
+	grid-column: 1 / -1;
+	justify-self: start;
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin: 0;
+}
+
+.backup-schedule-form > .backup-submit-row {
+	grid-column: 1 / -1;
+	margin-top: 0.5rem;
+}
+
+.backup-run-now {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.65rem 1rem;
+	margin-top: 1.25rem;
+	padding-top: 1.1rem;
+	border-top: 1px solid var(--tm-border-soft);
+}
+
+.backup-run-now form {
+	margin: 0;
+}
+
+.backup-run-now button {
+	width: auto;
+	margin: 0;
+}
+
+.backup-run-now .muted {
+	flex: 1 1 18rem;
+	max-width: 60ch;
+	margin: 0;
+}
+
+@media (max-width: 560px) {
+	.backup-run-now {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.backup-run-now .muted {
+		flex-basis: auto;
+	}
+
+	.backup-run-now button {
+		width: 100%;
+	}
+}
+
 /* ─── Backup destination: provider tiles + grouped form ───────────────────── */
 /* The provider tiles are radios inside the destination POST form. The guide
    for the checked tile is shown with :has(), so no JavaScript is involved;

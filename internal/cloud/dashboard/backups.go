@@ -63,6 +63,17 @@ type BackupDestinationForm struct {
 	Error string
 }
 
+// BackupScheduleForm marks the schedule field a refused save is about. The
+// form re-renders from the stored schedule, so a refused value is never
+// echoed.
+type BackupScheduleForm struct {
+	// Field is "time" or "timezone"; empty when the error is not about one
+	// of them.
+	Field string
+	// Error is the fixed validation reason.
+	Error string
+}
+
 // BackupDestinationCheck is the typed result of checking a destination
 // before saving it (POST /dashboard/admin/backups/destination/check). It
 // never holds a credential or a provider's answer.
@@ -97,6 +108,8 @@ type BackupsPageView struct {
 	Notice    BackupsNotice
 	// DestinationForm re-renders a refused destination save.
 	DestinationForm BackupDestinationForm
+	// ScheduleForm marks the field of a refused schedule save.
+	ScheduleForm BackupScheduleForm
 	// DestinationTest is the newest connection test since the destination
 	// was last saved; zero when it was not tested since.
 	DestinationTest cloudstore.BackupDestinationTest
@@ -143,6 +156,21 @@ func (v BackupsPageView) destinationNotice() BackupsNotice {
 
 func (v BackupsPageView) scheduleFormVisible() bool {
 	return v.settingsFormsVisible() && v.Destination.Configured
+}
+
+// scheduleFieldError is the validation reason shown next to a schedule
+// field.
+func (v BackupsPageView) scheduleFieldError(field string) string {
+	if field != "" && v.ScheduleForm.Field == field {
+		return v.ScheduleForm.Error
+	}
+	return ""
+}
+
+// scheduleFieldAttrs marks the refused schedule field and links its error
+// and hint text with aria-describedby.
+func (v BackupsPageView) scheduleFieldAttrs(field, id string, hint bool) templ.Attributes {
+	return backupFieldAttrs(v.scheduleFieldError(field) != "", id, hint)
 }
 
 func (v BackupsPageView) scheduleStatusLabel() string {
@@ -421,9 +449,15 @@ func (v BackupsPageView) destinationFieldError(field string) string {
 // destinationFieldAttrs marks the failing field and links its hint and
 // error text with aria-describedby.
 func (v BackupsPageView) destinationFieldAttrs(field, id string, hint bool) templ.Attributes {
+	return backupFieldAttrs(v.destinationFieldError(field) != "", id, hint)
+}
+
+// backupFieldAttrs marks an invalid field and links its error (id-error) and
+// hint (id-hint) text with aria-describedby.
+func backupFieldAttrs(invalid bool, id string, hint bool) templ.Attributes {
 	var describedBy []string
 	attrs := templ.Attributes{}
-	if v.destinationFieldError(field) != "" {
+	if invalid {
 		attrs["aria-invalid"] = "true"
 		describedBy = append(describedBy, id+"-error")
 	}

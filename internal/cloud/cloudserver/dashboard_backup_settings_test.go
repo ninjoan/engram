@@ -431,7 +431,7 @@ func TestDashboardBackupsPageRendersDestinationScheduleAndControls(t *testing.T)
 		`name="weekday" value="fri" checked`,
 		`name="weekday" value="tue"`,
 		`name="time" value="03:00"`,
-		`name="timezone" value="America/Lima"`,
+		`<option value="America/Lima" selected>America/Lima (UTC−05:00)</option>`,
 		`name="enabled" value="on" checked`,
 		`name="secret_access_key" value=""`,
 		"Back up now",
