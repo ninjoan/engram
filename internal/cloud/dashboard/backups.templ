@@ -11,7 +11,10 @@ import "time"
 // trail; this page only renders forms for sessions that hold that capability.
 // Controls appear only when they map to a real action: the settings forms
 // need ENGRAM_CLOUD_BACKUP_KEY, the schedule needs a destination, and
-// "Back up now" needs a backup runner. A stored credential is never rendered;
+// "Back up now" needs a backup runner. What a backup contains is a
+// plain-language summary grouped from cloudstore.BackupTables() and
+// BackupExclusions(), with the exact lists in a collapsed "Technical
+// details". A stored credential is never rendered;
 // only the masked access key id hint is. There is deliberately no restore
 // control: archives are unsigned, so restore stays an operator-only CLI
 // (engram cloud backup import).
@@ -47,7 +50,37 @@ templ AdminBackupsPage(v BackupsPageView) {
 		</div>
 		<h3 class="section-block-title">Scheduled backups</h3>
 		@backupScheduledSection(v)
-		<h3 class="section-block-title">Included</h3>
+		@backupContents(v)
+		<h3 class="section-block-title">Restore</h3>
+		<p class="muted">Restoring is operator-only: run <code>engram cloud backup import</code> against a fresh database. The dashboard never restores archives because they are not signed.</p>
+	</section>
+}
+
+// backupContents says in plain language what a backup holds and never
+// holds, with the exact table and column lists collapsed below.
+templ backupContents(v BackupsPageView) {
+	<h3 class="section-block-title">What a backup contains</h3>
+	<div class="backup-contents">
+		<section class="backup-contents-group is-included" aria-labelledby="backup-included-title">
+			<h4 id="backup-included-title">Included</h4>
+			<ul class="backup-contents-list">
+				for _, g := range v.backupContentsIncluded() {
+					<li><span class="backup-contents-mark" aria-hidden="true">✓</span><span class="backup-contents-text"><strong>{ g.Label }</strong></span></li>
+				}
+			</ul>
+		</section>
+		<section class="backup-contents-group is-excluded" aria-labelledby="backup-excluded-title">
+			<h4 id="backup-excluded-title">Never included</h4>
+			<ul class="backup-contents-list">
+				for _, g := range v.backupContentsExcluded() {
+					<li><span class="backup-contents-mark" aria-hidden="true">✕</span><span class="backup-contents-text"><strong>{ g.Label }</strong>{ backupContentsDetail(g.Detail) }@backupEnvVarList(g.EnvVars)</span></li>
+				}
+			</ul>
+		</section>
+	</div>
+	<details class="tech-details"><summary>{ v.backupTechnicalDetailsLabel() }</summary>
+		<p class="muted">The exact tables and columns, as recorded in the archive's <code>backup.json</code> manifest.</p>
+		<h4 class="tech-details-title">Tables included</h4>
 		<table class="data-table">
 			<tbody>
 				for _, table := range v.Tables {
@@ -55,7 +88,7 @@ templ AdminBackupsPage(v BackupsPageView) {
 				}
 			</tbody>
 		</table>
-		<h3 class="section-block-title">Never included</h3>
+		<h4 class="tech-details-title">Never included</h4>
 		<table class="data-table">
 			<thead>
 				<tr>
@@ -66,18 +99,20 @@ templ AdminBackupsPage(v BackupsPageView) {
 			</thead>
 			<tbody>
 				for _, exclusion := range v.Exclusions {
-					<tr>
-						<td><code>{ exclusion.Table }</code></td>
-						<td>{ emptyDash(exclusion.Column) }</td>
-						<td>{ exclusion.Reason }</td>
-					</tr>
+					<tr><td><code>{ exclusion.Table }</code></td><td>{ emptyDash(exclusion.Column) }</td><td>{ exclusion.Reason }</td></tr>
 				}
 			</tbody>
 		</table>
-		<p class="muted">Environment secrets such as <code>ENGRAM_CLOUD_TOKEN_PEPPER</code>, <code>ENGRAM_JWT_SECRET</code> and <code>ENGRAM_CLOUD_BACKUP_KEY</code> are never part of a backup. After a restore every managed token must be re-issued and the backup destination and schedule configured again.</p>
-		<h3 class="section-block-title">Restore</h3>
-		<p class="muted">Restoring is operator-only: run <code>engram cloud backup import</code> against a fresh database. The dashboard never restores archives because they are not signed.</p>
-	</section>
+	</details>
+}
+
+// backupEnvVarList names the environment variables a never-included line
+// stands for, as "(environment variables such as A, B, C)"; it renders
+// nothing without any.
+templ backupEnvVarList(names []string) {
+	for i, name := range names {
+		<span>{ backupEnvVarLead(i) }<code>{ name }</code>{ backupEnvVarTail(i, len(names)) }</span>
+	}
 }
 
 // backupScheduledSection renders the destination, schedule, "Back up now"
@@ -107,10 +142,10 @@ templ backupScheduledSection(v BackupsPageView) {
 
 // backupDestinationBlock renders the destination: the status card of the
 // stored destination (provider derived from its endpoint host, status pill,
-// where the next backup lands, masked access key id, last upload) with the
-// form and the remove confirm collapsed behind "Change destination", or the
-// provider tiles and grouped form when none is stored. Forms render only for
-// managed admins with the backup key set.
+// where the next backup lands, masked access key id, last upload, and the
+// remove confirm) with the form collapsed behind "Change destination", or
+// the guided setup when none is stored. Forms render only for managed
+// admins with the backup key set.
 templ backupDestinationBlock(v BackupsPageView) {
 	<section class="data-frame backup-destination" aria-labelledby="backup-destination-title">
 		<p class="section-kicker" id="backup-destination-title">DESTINATION</p>
@@ -152,13 +187,6 @@ templ backupDestinationBlock(v BackupsPageView) {
 					<summary>Change destination</summary>
 					<p class="hint">The same provider tiles and grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
 					@backupDestinationForm(v)
-					<details class="backup-danger-zone">
-						<summary>Remove destination…</summary>
-						<form method="post" action="/dashboard/admin/backups/destination/remove" class="backup-confirm">
-							<p>Stop uploading to <strong>{ v.Destination.Bucket }</strong>? The saved keys are deleted. Archives already in the bucket stay there. While the schedule stays enabled, each scheduled time is recorded as skipped until you add a destination.</p>
-							<button type="submit" class="backup-danger-fill">Remove destination</button>
-						</form>
-					</details>
 				</details>
 			} else {
 				@backupDestinationWizard(v)
@@ -171,8 +199,9 @@ templ backupDestinationBlock(v BackupsPageView) {
 // It never holds a credential: only the masked access key id hint. The pill
 // pairs a word with a shape (Connected, Not tested, Failing, Locked) and
 // comes from the newest backup.destination.test audit row since the last
-// save; "Test connection" is the only control and renders only for managed
-// admins with the backup key set.
+// save. "Test connection" and "Remove destination" render only for managed
+// admins with the backup key set; remove is a native <details> confirm
+// step, so it works without JavaScript.
 templ backupDestinationSummary(v BackupsPageView) {
 	<div class="backup-summary">
 		@backupProviderMark(v.configuredBackupProvider())
@@ -238,6 +267,14 @@ templ backupDestinationSummary(v BackupsPageView) {
 			</div>
 		}
 	</dl>
+	if v.settingsFormsVisible() {
+		<details class="backup-remove"><summary class="backup-remove-toggle">Remove destination</summary>
+			<form method="post" action="/dashboard/admin/backups/destination/remove" class="backup-confirm">
+				<p><strong>Remove this destination?</strong> Engram stops uploading to <strong>{ v.Destination.Bucket }</strong> and deletes the saved keys. Backups already uploaded stay in the bucket. While the schedule stays enabled, each scheduled run is recorded as skipped until you save a new destination.</p>
+				<button type="submit" class="backup-danger-fill">Yes, remove destination</button>
+			</form>
+		</details>
+	}
 }
 
 // backupDestinationStatusMeta is the line under the status pill: when and

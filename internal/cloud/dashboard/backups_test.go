@@ -227,7 +227,7 @@ func TestAdminBackupsPageReadOnlyStatesRenderNoForms(t *testing.T) {
 			if !strings.Contains(body, `<h4 class="backup-summary-title">Cloudflare R2`) || !strings.Contains(body, "engram-backups/prod/") || !strings.Contains(body, "****7f3a") {
 				t.Fatalf("read-only summary missing, body=%q", body)
 			}
-			for _, forbidden := range []string{`action="/dashboard/admin/backups/destination`, `type="radio"`, "<details", "Change destination", `name="secret_access_key"`} {
+			for _, forbidden := range []string{`action="/dashboard/admin/backups/destination`, `type="radio"`, `<details class="backup-`, "Change destination", `name="secret_access_key"`} {
 				if strings.Contains(body, forbidden) {
 					t.Fatalf("read-only state must not render %q", forbidden)
 				}

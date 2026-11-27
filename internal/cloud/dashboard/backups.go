@@ -701,10 +701,146 @@ func (c BackupDestinationCheck) message() backupCheckMessage {
 	return m
 }
 
+// backupContentGroup is one plain-language line of what a backup contains
+// or never contains. Hidden groups are mapped (so every table and exclusion
+// has exactly one group) but only listed under the technical details.
+type backupContentGroup struct {
+	ID     string
+	Label  string
+	Detail string
+	// EnvVars names server secrets that live in the environment, never in a
+	// table; a group with EnvVars is shown even without a mapped member.
+	EnvVars []string
+	Hidden  bool
+}
+
+var backupIncludedGroups = []backupContentGroup{
+	{ID: "memories", Label: "Memories and sessions of every project"},
+	{ID: "access", Label: "Users, permissions and project pauses"},
+	{ID: "audit", Label: "Audit logs"},
+}
+
+var backupExcludedGroups = []backupContentGroup{
+	{ID: "credentials", Label: "Tokens and passwords", Detail: "managed tokens are re-issued after a restore"},
+	{ID: "backup-settings", Label: "Backup destination, schedule and run history", Detail: "configure them again after a restore"},
+	{ID: "secrets", Label: "Server secrets", EnvVars: []string{"ENGRAM_CLOUD_TOKEN_PEPPER", "ENGRAM_JWT_SECRET", "ENGRAM_CLOUD_BACKUP_KEY"}},
+	// Legacy columns and the instance-bound receipt audit mean nothing to an
+	// admin; they stay in the technical details only.
+	{ID: "internal", Label: "Internal bookkeeping", Hidden: true},
+}
+
+// backupTableGroups maps every table of cloudstore.BackupTables() to its
+// included group; backups_contents_test.go fails when a table is missing.
+var backupTableGroups = map[string]string{
+	"cloud_chunks":                     "memories",
+	"cloud_project_sessions":           "memories",
+	"cloud_mutations":                  "memories",
+	"cloud_session_authority":          "memories",
+	"cloud_prompt_pair_claims":         "memories",
+	"cloud_prompt_source_attestations": "memories",
+	"cloud_users":                      "access",
+	"cloud_principals":                 "access",
+	"cloud_human_users":                "access",
+	"cloud_project_grants":             "access",
+	"cloud_project_controls":           "access",
+	"cloud_auth_audit_log":             "audit",
+	"cloud_sync_audit_log":             "audit",
+}
+
+// backupExclusionGroups maps every cloudstore.BackupExclusions() entry, by
+// backupExclusionKey, to its never-included group.
+var backupExclusionGroups = map[string]string{
+	"cloud_principal_tokens":    "credentials",
+	"cloud_users.password_hash": "credentials",
+	"cloud_backup_destinations": "backup-settings",
+	"cloud_backup_schedule":     "backup-settings",
+	"cloud_backup_runs":         "backup-settings",
+	"cloud_chunks.user_id,imported_at,sessions,memories,prompts": "internal",
+	"cloud_mutations.user_id":                                    "internal",
+	"receipt_audit.*":                                            "internal",
+}
+
+// backupExclusionKey identifies an exclusion as table or table.column.
+func backupExclusionKey(e cloudstore.BackupExclusion) string {
+	if e.Column == "" {
+		return e.Table
+	}
+	return e.Table + "." + e.Column
+}
+
+// backupContentsIncluded lists the included groups that hold at least one
+// table of the page's list, in a fixed order.
+func (v BackupsPageView) backupContentsIncluded() []backupContentGroup {
+	present := map[string]bool{}
+	for _, table := range v.Tables {
+		present[backupTableGroups[table]] = true
+	}
+	return backupVisibleGroups(backupIncludedGroups, present)
+}
+
+// backupContentsExcluded lists the never-included groups that hold at
+// least one exclusion of the page's list, plus the server secrets.
+func (v BackupsPageView) backupContentsExcluded() []backupContentGroup {
+	present := map[string]bool{}
+	for _, e := range v.Exclusions {
+		present[backupExclusionGroups[backupExclusionKey(e)]] = true
+	}
+	return backupVisibleGroups(backupExcludedGroups, present)
+}
+
+func backupVisibleGroups(groups []backupContentGroup, present map[string]bool) []backupContentGroup {
+	var out []backupContentGroup
+	for _, g := range groups {
+		if !g.Hidden && (present[g.ID] || len(g.EnvVars) > 0) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// backupTechnicalDetailsLabel is the summary of the collapsed table lists,
+// with counts computed from them.
+func (v BackupsPageView) backupTechnicalDetailsLabel() string {
+	return "Technical details (" + backupCount(len(v.Tables), "table", "tables") + " included, " + backupCount(len(v.Exclusions), "exclusion", "exclusions") + ")"
+}
+
+func backupCount(n int, singular, plural string) string {
+	if n == 1 {
+		return "1 " + singular
+	}
+	return strconv.Itoa(n) + " " + plural
+}
+
 // role announces a passed check politely and a failed one as an alert.
 func (m backupCheckMessage) role() string {
 	if m.Kind == "success" {
 		return "status"
 	}
 	return "alert"
+}
+
+// backupContentsDetail is why a never-included line is left out, after a
+// dash; empty without a reason.
+func backupContentsDetail(detail string) string {
+	if detail == "" {
+		return ""
+	}
+	return " — " + detail
+}
+
+// backupEnvVarLead is the text before the i-th environment variable of a
+// never-included line.
+func backupEnvVarLead(i int) string {
+	if i == 0 {
+		return " (environment variables such as "
+	}
+	return ", "
+}
+
+// backupEnvVarTail closes the list after its last environment variable.
+func backupEnvVarTail(i, n int) string {
+	if i == n-1 {
+		return ")"
+	}
+	return ""
 }

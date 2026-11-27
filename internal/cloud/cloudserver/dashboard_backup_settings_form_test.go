@@ -101,7 +101,7 @@ func TestDashboardSaveBackupDestinationRerenderWithoutDestinationKeepsTheFormOpe
 	form.Del("provider")
 	rec := doBackupRequest(f.srv, backupRequest{method: http.MethodPost, path: backupDestinationPath, form: form.Encode(), cookie: f.cookie})
 	body := rec.Body.String()
-	if rec.Code != http.StatusBadRequest || strings.Contains(body, "<details") || !strings.Contains(body, `value="do" id="backup-provider-do" checked`) {
+	if rec.Code != http.StatusBadRequest || strings.Contains(body, `<details class="backup-`) || !strings.Contains(body, `value="do" id="backup-provider-do" checked`) {
 		t.Fatalf("expected the open form with the tile derived from the submitted endpoint, got %d body=%q", rec.Code, body)
 	}
 	if !strings.Contains(backupFormInputTag(t, body, "bucket"), `aria-invalid="true"`) || !strings.Contains(body, `<span class="backup-path-bucket">submitted-bucket</span>`) {

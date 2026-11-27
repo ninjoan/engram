@@ -77,7 +77,7 @@ func TestAdminBackupsPageEmptyStateRendersTheGuidedSetup(t *testing.T) {
 	if strings.Count(body, backupWizardScript) != 1 {
 		t.Fatalf("the wizard must load its script exactly once, body=%q", body)
 	}
-	for _, forbidden := range []string{"<details", "backup-provider-form", "backup-tiles", "onclick", "aria-invalid", "Destination not saved."} {
+	for _, forbidden := range []string{`<details class="backup-`, "backup-provider-form", "backup-tiles", "onclick", "aria-invalid", "Destination not saved."} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("empty state must not render %q", forbidden)
 		}

@@ -2450,19 +2450,50 @@ td:not(:first-child) p,
 	color: var(--engram-text-soft);
 }
 
-details.backup-danger-zone {
+/* Remove destination: a danger outline toggle on the status card that opens
+   an in-place confirm step (native <details>, no JavaScript). */
+
+details.backup-remove {
 	margin: 1rem 0 0;
+	padding-top: 1rem;
+	border-top: 1px solid var(--tm-border-soft);
 	border-bottom: 0;
 }
 
-details.backup-danger-zone > summary {
+details.backup-remove > summary.backup-remove-toggle {
 	display: inline-flex;
 	align-items: center;
 	min-height: 2.75rem;
+	padding: 0.55rem 1.1rem;
+	border: 1px solid rgba(255, 113, 143, 0.4);
+	border-radius: var(--shape-small);
+	background: transparent;
 	color: var(--engram-danger);
 	font-size: 0.88rem;
 	font-weight: 600;
+	line-height: 1.2;
 	cursor: pointer;
+	transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+details.backup-remove > summary.backup-remove-toggle::after {
+	display: none;
+}
+
+details.backup-remove > summary.backup-remove-toggle:hover,
+details.backup-remove[open] > summary.backup-remove-toggle {
+	border-color: var(--engram-danger);
+	background: rgba(255, 113, 143, 0.08);
+	color: var(--engram-danger);
+}
+
+details.backup-remove > summary.backup-remove-toggle:focus-visible {
+	outline: 2px solid var(--engram-primary);
+	outline-offset: 2px;
+}
+
+details.backup-remove[open] > summary.backup-remove-toggle {
+	margin-bottom: 0.75rem;
 }
 
 .backup-confirm {
@@ -2525,6 +2556,92 @@ details.backup-change[open] > .hint {
 	margin-bottom: 1rem;
 }
 
+/* What a backup contains: plain-language groups, exact lists collapsed. */
+
+.backup-contents {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 1rem;
+}
+
+.backup-contents-group {
+	padding: 1.1rem 1.25rem;
+	border: 1px solid var(--tm-border);
+	border-radius: var(--shape-large);
+	background: var(--tm-surface);
+}
+
+.backup-contents-group h4 {
+	margin: 0 0 0.75rem;
+	font-size: 1rem;
+	color: var(--engram-text);
+}
+
+.backup-contents-list {
+	display: grid;
+	gap: 0.6rem;
+	margin: 0;
+	padding: 0;
+}
+
+.backup-contents-list li {
+	display: grid;
+	grid-template-columns: 1.25rem minmax(0, 1fr);
+	gap: 0.4rem;
+	margin: 0;
+	list-style: none;
+	font-size: 0.92rem;
+	line-height: 1.5;
+	color: var(--engram-text-soft);
+}
+
+.backup-contents-list strong {
+	color: var(--engram-text);
+	font-weight: 600;
+}
+
+.backup-contents-mark {
+	font-weight: 700;
+}
+
+.is-included .backup-contents-mark {
+	color: var(--engram-success);
+}
+
+.is-excluded .backup-contents-mark {
+	color: var(--engram-danger);
+}
+
+details.tech-details {
+	margin: 1rem 0 0;
+	padding-top: 0.5rem;
+	border-top: 1px solid var(--tm-border-soft);
+	border-bottom: 0;
+}
+
+details.tech-details > summary {
+	display: flex;
+	align-items: center;
+	min-height: 2.75rem;
+	color: var(--engram-muted);
+	font-size: 0.9rem;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+details.tech-details > summary:hover {
+	color: var(--engram-text);
+}
+
+.tech-details-title {
+	margin: 1rem 0 0.5rem;
+	font-size: 0.72rem;
+	font-weight: 400;
+	letter-spacing: 0.18em;
+	text-transform: uppercase;
+	color: var(--st-pink);
+}
+
 @media (max-width: 900px) {
 	.backup-tiles {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2562,7 +2679,8 @@ details.backup-change[open] > .hint {
 	}
 
 	.backup-run-facts,
-	.backup-confirm {
+	.backup-confirm,
+	.backup-contents {
 		grid-template-columns: 1fr;
 	}
 }

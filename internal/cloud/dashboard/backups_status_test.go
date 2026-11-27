@@ -92,7 +92,7 @@ func TestAdminBackupsStatusCardKeyMissingIsLockedWithoutControls(t *testing.T) {
 	assertBackupMarkers(t, body, []string{
 		`<span class="backup-pill is-locked">Locked</span>`,
 		"engram-cloud-backup-&lt;yyyymmddThhmmssZ&gt;-run&lt;id&gt;.tar.gz",
-	}, []string{"is-connected", `action="/dashboard/admin/backups/destination`, "Test again", "<details"})
+	}, []string{"is-connected", `action="/dashboard/admin/backups/destination`, "Test again", `<details class="backup-`})
 }
 
 func TestAdminBackupsStatusCardReadOnlyShowsStatusWithoutControls(t *testing.T) {
@@ -101,7 +101,7 @@ func TestAdminBackupsStatusCardReadOnlyShowsStatusWithoutControls(t *testing.T) 
 	body := renderBackupsPageForTest(t, v)
 	assertBackupMarkers(t, body, []string{
 		`<span class="backup-pill is-failing">Failing</span>`, "Endpoint unreachable.",
-	}, []string{`action="/dashboard/admin/backups/destination`, "Test again", "Test connection</button>", "<details"})
+	}, []string{`action="/dashboard/admin/backups/destination`, "Test again", "Test connection</button>", `<details class="backup-`})
 }
 
 func TestAdminBackupsStatusCardShowsTheExactObjectPath(t *testing.T) {
@@ -157,18 +157,14 @@ func TestAdminBackupsStatusCardLastUploadAndFailure(t *testing.T) {
 	assertBackupMarkers(t, body, []string{"<dd>None yet</dd>", "<dt>Last failure</dt>", "skipped: no destination", "1 day ago"}, nil)
 }
 
-func TestAdminBackupsStatusCardRemoveIsAConfirmInsideChangeDestination(t *testing.T) {
+// The remove confirm moved from inside Change destination onto the status
+// card (backups_contents_test.go); Change destination holds no remove form.
+func TestAdminBackupsChangeDestinationHoldsNoRemoveForm(t *testing.T) {
 	body := renderBackupsPageForTest(t, statusBackupsView(testedAt(true, ""), cloudstore.BackupRunOutcomes{}))
-	change := strings.Index(body, `<details class="backup-change">`)
-	danger := strings.Index(body, `<details class="backup-danger-zone">`)
-	remove := strings.Index(body, `action="/dashboard/admin/backups/destination/remove"`)
-	if change < 0 || danger < change || remove < danger {
-		t.Fatalf("remove must sit in a confirm disclosure inside Change destination (change %d, danger %d, remove %d)", change, danger, remove)
+	change := body[strings.Index(body, `<details class="backup-change">`):]
+	if strings.Contains(change, `action="/dashboard/admin/backups/destination/remove"`) || strings.Contains(change, "backup-danger-zone") {
+		t.Fatalf("Change destination must not hold a second remove control, body=%q", change)
 	}
-	assertBackupMarkers(t, body, []string{
-		"<summary>Remove destination…</summary>",
-		"Stop uploading to <strong>engram-backups</strong>?",
-	}, nil)
 }
 
 func TestBackupRelativeTime(t *testing.T) {
