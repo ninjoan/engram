@@ -260,13 +260,10 @@ func TestPutBackupDestinationAuditFailureRollsBack(t *testing.T) {
 	}
 }
 
-func TestPutBackupDestinationRejectsInvalidInputWithoutWriting(t *testing.T) {
-	ctx := context.Background()
-	cs := openIsolatedCloudStore(t)
-	adminID := seedDestinationAdmin(t, cs)
-	sealer := testBackupSealer(t, 1)
-
-	cases := map[string]func(*PutBackupDestinationParams){
+// invalidBackupDestinationCases are the inputs PutBackupDestination and
+// ValidateBackupDestination must reject.
+func invalidBackupDestinationCases() map[string]func(*PutBackupDestinationParams) {
+	return map[string]func(*PutBackupDestinationParams){
 		"http remote endpoint":      func(p *PutBackupDestinationParams) { p.Endpoint = "http://acct.r2.cloudflarestorage.com" },
 		"endpoint without scheme":   func(p *PutBackupDestinationParams) { p.Endpoint = "acct.r2.cloudflarestorage.com" },
 		"ftp endpoint":              func(p *PutBackupDestinationParams) { p.Endpoint = "ftp://acct.example.test" },
@@ -292,6 +289,15 @@ func TestPutBackupDestinationRejectsInvalidInputWithoutWriting(t *testing.T) {
 		"empty secret":              func(p *PutBackupDestinationParams) { p.SecretAccessKey = "" },
 		"secret control char":       func(p *PutBackupDestinationParams) { p.SecretAccessKey = "abc\x00def" },
 	}
+}
+
+func TestPutBackupDestinationRejectsInvalidInputWithoutWriting(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+	adminID := seedDestinationAdmin(t, cs)
+	sealer := testBackupSealer(t, 1)
+
+	cases := invalidBackupDestinationCases()
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
 			params := validDestinationParams(adminID)
@@ -496,5 +502,100 @@ func TestOpenBackupDestinationCredentialsRequiresOpener(t *testing.T) {
 	cs := openIsolatedCloudStore(t)
 	if _, err := cs.OpenBackupDestinationCredentials(context.Background(), nil); !errors.Is(err, ErrBackupDestinationKeyRequired) {
 		t.Fatalf("Open without opener error = %v, want %v", err, ErrBackupDestinationKeyRequired)
+	}
+}
+
+// validBackupDestinationVariants are accepted inputs whose normalization
+// (trimmed values, endpoint reduced to its origin) the validator must share
+// with PutBackupDestination.
+func validBackupDestinationVariants() map[string]func(*PutBackupDestinationParams) {
+	return map[string]func(*PutBackupDestinationParams){
+		"as given":                func(*PutBackupDestinationParams) {},
+		"loopback http ip":        func(p *PutBackupDestinationParams) { p.Endpoint = "http://127.0.0.1:9000" },
+		"loopback http localhost": func(p *PutBackupDestinationParams) { p.Endpoint = "http://localhost:9000" },
+		"loopback http ipv6":      func(p *PutBackupDestinationParams) { p.Endpoint = "http://[::1]:9000" },
+		"trailing slash endpoint": func(p *PutBackupDestinationParams) { p.Endpoint = "https://minio.internal:9000/" },
+		"surrounding spaces": func(p *PutBackupDestinationParams) {
+			p.Bucket, p.Region, p.AccessKeyID = "  engram-backups ", " auto ", " "+testDestinationAccessKeyID+" "
+		},
+		"empty prefix":             func(p *PutBackupDestinationParams) { p.Prefix = "" },
+		"prefix without slash end": func(p *PutBackupDestinationParams) { p.Prefix = "prod" },
+	}
+}
+
+func TestValidateBackupDestinationRejectsWhatPutRejects(t *testing.T) {
+	for name, mutate := range invalidBackupDestinationCases() {
+		t.Run(name, func(t *testing.T) {
+			params := validDestinationParams("p-admin")
+			mutate(&params)
+			creds, err := ValidateBackupDestination(params)
+			if !errors.Is(err, ErrInvalidBackupDestination) {
+				t.Fatalf("Validate error = %v, want %v", err, ErrInvalidBackupDestination)
+			}
+			if creds != (BackupDestinationCredentials{}) {
+				t.Fatalf("a rejected destination must return no credentials, got %v", creds)
+			}
+			for _, secret := range []string{testDestinationSecret, "abc\x00def", "pass"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("error %q echoes a secret", err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateBackupDestinationNormalizesLikePut(t *testing.T) {
+	params := validDestinationParams("p-admin")
+	params.Endpoint = " https://minio.internal:9000/ "
+	params.Region = " auto "
+	params.Bucket = " engram-backups "
+	params.Prefix = " prod/engram/ "
+	params.AccessKeyID = " " + testDestinationAccessKeyID + " "
+	params.SecretAccessKey = " " + testDestinationSecret + " "
+	creds, err := ValidateBackupDestination(params)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	want := BackupDestinationCredentials{Endpoint: "https://minio.internal:9000", Region: "auto", Bucket: "engram-backups", Prefix: "prod/engram/", AccessKeyID: testDestinationAccessKeyID, SecretAccessKey: testDestinationSecret}
+	if creds != want {
+		t.Fatalf("Validate = %v (key %q), want %v", creds, creds.AccessKeyID, want)
+	}
+}
+
+// TestValidateBackupDestinationAgreesWithPut proves the exported validator
+// accepts and rejects exactly what PutBackupDestination does, with the same
+// error, and that an accepted destination is stored as the validator
+// normalized it.
+func TestValidateBackupDestinationAgreesWithPut(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+	adminID := seedDestinationAdmin(t, cs)
+	sealer := testBackupSealer(t, 1)
+	for name, mutate := range invalidBackupDestinationCases() {
+		params := validDestinationParams(adminID)
+		mutate(&params)
+		_, validateErr := ValidateBackupDestination(params)
+		putErr := cs.PutBackupDestination(ctx, params, sealer)
+		if validateErr == nil || putErr == nil || validateErr.Error() != putErr.Error() {
+			t.Fatalf("%s: Validate error %v, Put error %v, want the same rejection", name, validateErr, putErr)
+		}
+	}
+	for name, mutate := range validBackupDestinationVariants() {
+		params := validDestinationParams(adminID)
+		mutate(&params)
+		creds, err := ValidateBackupDestination(params)
+		if err != nil {
+			t.Fatalf("%s: Validate: %v", name, err)
+		}
+		if err := cs.PutBackupDestination(ctx, params, sealer); err != nil {
+			t.Fatalf("%s: Put: %v", name, err)
+		}
+		stored, err := cs.OpenBackupDestinationCredentials(ctx, sealer)
+		if err != nil {
+			t.Fatalf("%s: Open: %v", name, err)
+		}
+		if stored != creds {
+			t.Fatalf("%s: stored %v (key %q), validated %v (key %q)", name, stored, stored.AccessKeyID, creds, creds.AccessKeyID)
+		}
 	}
 }

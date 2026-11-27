@@ -62,15 +62,20 @@ func backupProviderSelection(body string) (values []string, checked []string) {
 	return values, checked
 }
 
-func TestAdminBackupsPageEmptyDestinationRendersProviderTilesAndGroupedForm(t *testing.T) {
-	body := renderBackupsPageForTest(t, readyBackupsView(cloudstore.BackupDestination{}))
+// The first-time (empty) state renders the guided setup instead
+// (backups_wizard_test.go); the provider tiles and grouped form stay behind
+// Change destination, pre-filled from the stored destination.
+func TestAdminBackupsPageChangeDestinationRendersProviderTilesAndGroupedForm(t *testing.T) {
+	d := configuredR2Destination()
+	d.Endpoint, d.Bucket, d.Prefix = "https://s3.qa.local:9443", "", ""
+	body := renderBackupsPageForTest(t, readyBackupsView(d))
 
 	values, checked := backupProviderSelection(body)
 	if got, want := strings.Join(values, ","), "r2,aws,b2,wasabi,do,minio,other"; got != want {
 		t.Fatalf("provider tiles = %q, want %q", got, want)
 	}
-	if len(checked) != 0 {
-		t.Fatalf("no tile may be preselected without a destination, got %v", checked)
+	if len(checked) != 1 || checked[0] != "other" {
+		t.Fatalf("the tile must come from the stored endpoint host, got %v", checked)
 	}
 	for _, marker := range []string{
 		`<form method="post" action="/dashboard/admin/backups/destination" class="backup-provider-form" autocomplete="off">`,
@@ -87,7 +92,6 @@ func TestAdminBackupsPageEmptyDestinationRendersProviderTilesAndGroupedForm(t *t
 		`<span class="backup-path-bucket">&lt;bucket&gt;</span>`,
 		"engram-cloud-backup-&lt;UTC timestamp&gt;-run&lt;id&gt;.tar.gz",
 		"Why paste both keys again?", "never shows them again",
-		"badge badge-muted\">Not configured", "No destination is configured.",
 		`<label for="backup-endpoint"`, `<label for="backup-secret-access-key"`,
 	} {
 		if !strings.Contains(body, marker) {
@@ -102,15 +106,15 @@ func TestAdminBackupsPageEmptyDestinationRendersProviderTilesAndGroupedForm(t *t
 	if tag := backupInputTag(t, body, "region"); !strings.Contains(tag, `value="auto"`) {
 		t.Fatalf("region must still default to auto, got %q", tag)
 	}
-	for _, forbidden := range []string{"<details", "<script", "hx-post", "aria-invalid", `action="/dashboard/admin/backups/destination/test"`} {
+	for _, forbidden := range []string{"<script", "hx-post", "aria-invalid", "data-backup-wizard"} {
 		if strings.Contains(body, forbidden) {
-			t.Fatalf("empty destination must not render %q", forbidden)
+			t.Fatalf("the Change destination form must not render %q", forbidden)
 		}
 	}
 }
 
 func TestAdminBackupsPageDestinationFormPostsOnlyTheStoredFields(t *testing.T) {
-	body := renderBackupsPageForTest(t, readyBackupsView(cloudstore.BackupDestination{}))
+	body := renderBackupsPageForTest(t, readyBackupsView(configuredR2Destination()))
 	start := strings.Index(body, `action="/dashboard/admin/backups/destination"`)
 	end := strings.Index(body[start:], "</form>")
 	if start < 0 || end < 0 {

@@ -335,6 +335,22 @@ func isNilBackupKeyHolder(holder any) bool {
 	return false
 }
 
+// ValidateBackupDestination applies exactly the validation and normalization
+// of PutBackupDestination without sealing or storing anything, for checking a
+// destination before it is saved. A rejection wraps
+// ErrInvalidBackupDestination with a fixed reason that never echoes a
+// credential or the endpoint; params.Actor is ignored.
+func ValidateBackupDestination(params PutBackupDestinationParams) (BackupDestinationCredentials, error) {
+	target, accessKeyID, secret, err := normalizeBackupDestination(params)
+	if err != nil {
+		return BackupDestinationCredentials{}, err
+	}
+	return BackupDestinationCredentials{
+		Endpoint: target.endpoint, Region: target.region, Bucket: target.bucket, Prefix: target.prefix,
+		AccessKeyID: accessKeyID, SecretAccessKey: secret,
+	}, nil
+}
+
 // normalizeBackupDestination validates params. Error messages never echo a
 // credential or the endpoint (which could carry userinfo).
 func normalizeBackupDestination(params PutBackupDestinationParams) (backupDestinationTarget, string, string, error) {

@@ -100,6 +100,9 @@ const (
 	backupReasonNotConfigured      = "not_configured"
 	backupReasonAlreadyRunning     = "already_running"
 	backupReasonRunnerError        = "runner_error"
+	// backupReasonInvalidDestination is the reason code of a
+	// backup.destination.check refused by validation.
+	backupReasonInvalidDestination = "invalid_destination"
 )
 
 // backupNotices maps the notice query parameter to a fixed message, so a
@@ -153,9 +156,16 @@ func (s *CloudServer) renderBackupsPage(w http.ResponseWriter, r *http.Request, 
 // renderBackupsPageWithForm renders the page and re-renders a refused
 // destination save from form, which never carries a credential.
 func (s *CloudServer) renderBackupsPageWithForm(w http.ResponseWriter, r *http.Request, status int, notice dashboard.BackupsNotice, form dashboard.BackupDestinationForm) {
+	s.renderBackupsPageWithCheck(w, r, status, notice, form, dashboard.BackupDestinationCheck{})
+}
+
+// renderBackupsPageWithCheck renders the page with a re-rendered form and
+// the result of a destination check; neither carries a credential.
+func (s *CloudServer) renderBackupsPageWithCheck(w http.ResponseWriter, r *http.Request, status int, notice dashboard.BackupsNotice, form dashboard.BackupDestinationForm, check dashboard.BackupDestinationCheck) {
 	view := s.backupsPageView(r)
 	view.Notice = notice
 	view.DestinationForm = form
+	view.DestinationCheck = check
 	if view.Settings == dashboard.BackupSettingsUnavailable && status == http.StatusOK {
 		status = http.StatusBadGateway
 	}
@@ -249,17 +259,7 @@ func (s *CloudServer) handleDashboardSaveBackupDestination(w http.ResponseWriter
 	if !parseDashboardMutationForm(w, r) {
 		return
 	}
-	// PostForm holds only url-encoded body fields: credentials in the URL
-	// query string or in a JSON body are never read.
-	params := cloudstore.PutBackupDestinationParams{
-		Endpoint:        r.PostForm.Get("endpoint"),
-		Region:          r.PostForm.Get("region"),
-		Bucket:          r.PostForm.Get("bucket"),
-		Prefix:          r.PostForm.Get("prefix"),
-		AccessKeyID:     r.PostForm.Get("access_key_id"),
-		SecretAccessKey: r.PostForm.Get("secret_access_key"),
-		Actor:           backupStoreActor(actor),
-	}
+	params := backupDestinationFormParams(r, actor)
 	err := s.backupSettings.PutBackupDestination(r.Context(), params, s.backupKey)
 	switch {
 	case err == nil:
@@ -269,20 +269,43 @@ func (s *CloudServer) handleDashboardSaveBackupDestination(w http.ResponseWriter
 		// The form re-renders the submitted non-secret fields, marks the
 		// field the reason is about and leaves both credentials empty.
 		reason := backupValidationReason(err, cloudstore.ErrInvalidBackupDestination)
-		form := dashboard.BackupDestinationForm{
-			Submitted: true,
-			Provider:  r.PostForm.Get("provider"),
-			Endpoint:  backupEchoableEndpoint(params.Endpoint),
-			Region:    params.Region,
-			Bucket:    params.Bucket,
-			Prefix:    params.Prefix,
-			Field:     backupDestinationInvalidField(reason),
-			Error:     reason,
-		}
+		form := refusedBackupDestinationForm(r, params, backupDestinationInvalidField(reason), reason)
 		s.renderBackupsPageWithForm(w, r, http.StatusBadRequest, dashboard.BackupsNotice{Kind: "danger", Message: "Destination not saved: " + reason + ".", Destination: true}, form)
 	default:
 		log.Printf("[engram-cloud] save backup destination failed: actor=%q: %v", actor.ID, err)
 		http.Error(w, "save backup destination failed", http.StatusInternalServerError)
+	}
+}
+
+// backupDestinationFormParams reads the destination from the POST form.
+// PostForm holds only url-encoded body fields: credentials in the URL query
+// string, a multipart body or a JSON body are never read.
+func backupDestinationFormParams(r *http.Request, actor cloudauth.Principal) cloudstore.PutBackupDestinationParams {
+	return cloudstore.PutBackupDestinationParams{
+		Endpoint:        r.PostForm.Get("endpoint"),
+		Region:          r.PostForm.Get("region"),
+		Bucket:          r.PostForm.Get("bucket"),
+		Prefix:          r.PostForm.Get("prefix"),
+		AccessKeyID:     r.PostForm.Get("access_key_id"),
+		SecretAccessKey: r.PostForm.Get("secret_access_key"),
+		Actor:           backupStoreActor(actor),
+	}
+}
+
+// refusedBackupDestinationForm is the submitted form as the page may
+// re-render it: the non-secret fields (the endpoint omitted when it may
+// carry userinfo), the failing field and its fixed reason, never a
+// credential.
+func refusedBackupDestinationForm(r *http.Request, params cloudstore.PutBackupDestinationParams, field, reason string) dashboard.BackupDestinationForm {
+	return dashboard.BackupDestinationForm{
+		Submitted: true,
+		Provider:  r.PostForm.Get("provider"),
+		Endpoint:  backupEchoableEndpoint(params.Endpoint),
+		Region:    params.Region,
+		Bucket:    params.Bucket,
+		Prefix:    params.Prefix,
+		Field:     field,
+		Error:     reason,
 	}
 }
 
@@ -361,6 +384,84 @@ func (s *CloudServer) handleDashboardTestBackupDestination(w http.ResponseWriter
 		return
 	}
 	redirectDashboardAdmin(w, r, backupsPageURL+"?notice="+notice)
+}
+
+// handleDashboardCheckBackupDestination handles POST
+// /dashboard/admin/backups/destination/check: the guided setup's "Test
+// connection" before saving. It reads the destination from the POST form
+// exactly like the save route, validates it with the same rules
+// (cloudstore.ValidateBackupDestination) and runs the same bounded,
+// read-only access check as the test route, without storing or opening
+// anything. The typed result (ok, auth, bucket, network, error or invalid)
+// is audited as backup.destination.check and answered in place: an HTML
+// fragment with 200 for HTMX, else the page with the form re-rendered (400
+// for a validation error). Credentials are never echoed or audited.
+func (s *CloudServer) handleDashboardCheckBackupDestination(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.backupSettingsActor(w, r, true)
+	if !ok {
+		return
+	}
+	if !parseDashboardMutationForm(w, r) {
+		return
+	}
+	store, ok := s.adminStore(w)
+	if !ok {
+		return
+	}
+	params := backupDestinationFormParams(r, actor)
+	var result dashboard.BackupDestinationCheck
+	var reason string
+	var metadata map[string]any
+	creds, err := cloudstore.ValidateBackupDestination(params)
+	switch {
+	case errors.Is(err, cloudstore.ErrInvalidBackupDestination):
+		// The submitted endpoint is not audited: it was not validated and may
+		// carry userinfo.
+		message := backupValidationReason(err, cloudstore.ErrInvalidBackupDestination)
+		result = dashboard.BackupDestinationCheck{Result: "invalid", Field: backupDestinationInvalidField(message), Error: message}
+		reason = backupReasonInvalidDestination
+		metadata = map[string]any{"result": result.Result}
+		if result.Field != "" {
+			metadata["field"] = result.Field
+		}
+	case err != nil:
+		log.Printf("[engram-cloud] backup destination check failed to validate: actor=%q: %v", actor.ID, err)
+		http.Error(w, "check backup destination failed", http.StatusInternalServerError)
+		return
+	default:
+		check := s.backupCheckAccess
+		if check == nil {
+			check = checkBackupDestinationAccess
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), backupConnectionTestTimeout)
+		var notice string
+		notice, reason = classifyBackupConnectionTest(check(ctx, creds))
+		cancel()
+		result = dashboard.BackupDestinationCheck{Result: strings.TrimPrefix(notice, "test-")}
+		metadata = map[string]any{"endpoint": creds.Endpoint, "bucket": creds.Bucket, "result": result.Result}
+	}
+	event := adminAuditEvent(actor, authAuditActionBackupDestinationCheck, "", "", metadata)
+	if reason != "" {
+		event.Outcome = authAuditOutcomeFailure
+		event.ReasonCode = reason
+	}
+	if err := store.InsertAuthAuditEvent(r.Context(), event); err != nil {
+		log.Printf("[engram-cloud] backup destination check audit failed: actor=%q: %v", actor.ID, err)
+		http.Error(w, "record audit failed", http.StatusInternalServerError)
+		return
+	}
+	if isDashboardHTMXRequest(r) {
+		// htmx swaps only 2xx answers, so every typed result is a 200.
+		w.Header().Set("Cache-Control", "no-store")
+		renderDashboardAdminComponentStatus(w, r, http.StatusOK, dashboard.BackupDestinationCheckResult(result))
+		return
+	}
+	status := http.StatusOK
+	if result.Result == "invalid" {
+		status = http.StatusBadRequest
+	}
+	form := refusedBackupDestinationForm(r, params, result.Field, result.Error)
+	s.renderBackupsPageWithCheck(w, r, status, dashboard.BackupsNotice{}, form, result)
 }
 
 // classifyBackupConnectionTest maps a CheckAccess result to a notice and a

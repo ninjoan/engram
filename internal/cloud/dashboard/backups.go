@@ -63,6 +63,20 @@ type BackupDestinationForm struct {
 	Error string
 }
 
+// BackupDestinationCheck is the typed result of checking a destination
+// before saving it (POST /dashboard/admin/backups/destination/check). It
+// never holds a credential or a provider's answer.
+type BackupDestinationCheck struct {
+	// Result is ok, auth, bucket, network, error or invalid; empty when no
+	// check ran.
+	Result string
+	// Field names the form field a validation error is about; empty when
+	// the error is not about a single field.
+	Field string
+	// Error is the fixed validation reason of an invalid result.
+	Error string
+}
+
 // BackupsPageView is everything the admin Backups page renders. It is built
 // by internal/cloud/cloudserver, which owns the routes, the managed-admin
 // policy and the stores; it never holds a credential.
@@ -88,6 +102,9 @@ type BackupsPageView struct {
 	DestinationTest cloudstore.BackupDestinationTest
 	// LastRuns is the newest successful and the newest failed run.
 	LastRuns cloudstore.BackupRunOutcomes
+	// DestinationCheck is the result of a connection check of submitted,
+	// unsaved fields, shown in the guided setup's last step.
+	DestinationCheck BackupDestinationCheck
 	// Now is the time relative times are measured from; zero uses the
 	// wall clock.
 	Now time.Time
@@ -542,4 +559,118 @@ func backupPathBucket(bucket string) string {
 		return "<bucket>"
 	}
 	return strings.TrimSpace(bucket)
+}
+
+// wizardVisible renders the guided setup: only for the first-time state, a
+// managed admin with the backup key set and no destination. A configured
+// destination keeps the status card and the provider tiles behind "Change
+// destination".
+func (v BackupsPageView) wizardVisible() bool {
+	return v.settingsFormsVisible() && !v.Destination.Configured
+}
+
+// destinationSaveRefused is true when the form re-renders a refused save; a
+// re-render after a check shows the check result instead.
+func (v BackupsPageView) destinationSaveRefused() bool {
+	return v.DestinationForm.Submitted && v.DestinationCheck.Result == ""
+}
+
+// backupWizardStepForField is the guided setup step that holds field.
+func backupWizardStepForField(field string) string {
+	switch field {
+	case "endpoint", "region", "bucket", "prefix":
+		return "2"
+	case "access_key_id", "secret_access_key":
+		return "3"
+	}
+	return ""
+}
+
+// wizardStartStep is the step the script opens first: the step of the field
+// a refused save or check is about, the last step after a finished check,
+// else the first.
+func (v BackupsPageView) wizardStartStep() string {
+	if step := backupWizardStepForField(v.DestinationForm.Field); step != "" && v.DestinationForm.Submitted {
+		return step
+	}
+	if v.DestinationCheck.Result != "" {
+		if step := backupWizardStepForField(v.DestinationCheck.Field); step != "" {
+			return step
+		}
+		return "4"
+	}
+	return "1"
+}
+
+// backupWizardStep is one step of the guided setup.
+type backupWizardStep struct {
+	Number string
+	Name   string
+	// Sub is the line under the step name until the script fills in what
+	// was chosen.
+	Sub string
+}
+
+var backupWizardSteps = []backupWizardStep{
+	{Number: "1", Name: "Provider", Sub: "where archives go"},
+	{Number: "2", Name: "Connection", Sub: "endpoint, bucket"},
+	{Number: "3", Name: "Credentials", Sub: "both keys"},
+	{Number: "4", Name: "Test & save", Sub: "check, then save"},
+}
+
+// wizardSummaryValue is a non-secret value for the setup summary, or "" when
+// the field is empty.
+func (v BackupsPageView) wizardSummaryValue(field string) string {
+	return strings.TrimSpace(v.destinationFormValue(field))
+}
+
+// wizardProviderName names the selected provider in the setup summary.
+func (v BackupsPageView) wizardProviderName() string {
+	if p, ok := lookupBackupProvider(v.selectedBackupProvider()); ok {
+		return p.Name
+	}
+	return ""
+}
+
+// backupCheckMessage is the fixed text of a check result. Step is the
+// guided setup step to go back to, with its link label.
+type backupCheckMessage struct {
+	Kind, Title, Detail, Step, StepLabel string
+}
+
+var backupCheckMessages = map[string]backupCheckMessage{
+	"ok":      {Kind: "success", Title: "Connected.", Detail: "Engram listed the bucket with these keys."},
+	"auth":    {Kind: "danger", Title: "Keys rejected.", Detail: "The provider refused this key pair or its permissions. Paste a key that can list and write objects in this bucket.", Step: "3", StepLabel: "Back to credentials"},
+	"bucket":  {Kind: "danger", Title: "Bucket not found.", Detail: "The bucket does not exist at this endpoint. Check the bucket name and the endpoint (for Cloudflare R2, the account id).", Step: "2", StepLabel: "Back to connection"},
+	"network": {Kind: "danger", Title: "Endpoint unreachable.", Detail: "Network error or no answer within 15 s. Check the endpoint, DNS and the firewall from this server, then test again.", Step: "2", StepLabel: "Back to connection"},
+	"error":   {Kind: "danger", Title: "Unexpected response.", Detail: "The destination answered in a way Engram does not recognize. Check the endpoint and the region.", Step: "2", StepLabel: "Back to connection"},
+	"invalid": {Kind: "danger", Title: "Check the destination."},
+}
+
+// message is the fixed text of the check result; an unknown result has no
+// title and renders nothing.
+func (c BackupDestinationCheck) message() backupCheckMessage {
+	m, ok := backupCheckMessages[c.Result]
+	if !ok {
+		return backupCheckMessage{}
+	}
+	if c.Result == "invalid" {
+		m.Detail = c.Error + "."
+		m.Step = backupWizardStepForField(c.Field)
+		switch m.Step {
+		case "2":
+			m.StepLabel = "Back to connection"
+		case "3":
+			m.StepLabel = "Back to credentials"
+		}
+	}
+	return m
+}
+
+// role announces a passed check politely and a failed one as an alert.
+func (m backupCheckMessage) role() string {
+	if m.Kind == "success" {
+		return "status"
+	}
+	return "alert"
 }

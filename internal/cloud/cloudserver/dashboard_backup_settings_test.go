@@ -23,6 +23,7 @@ const (
 	backupDestinationPath       = "/dashboard/admin/backups/destination"
 	backupDestinationTestPath   = "/dashboard/admin/backups/destination/test"
 	backupDestinationRemovePath = "/dashboard/admin/backups/destination/remove"
+	backupDestinationCheckPath  = "/dashboard/admin/backups/destination/check"
 	backupSchedulePath          = "/dashboard/admin/backups/schedule"
 	backupRunPath               = "/dashboard/admin/backups/run"
 
@@ -307,6 +308,7 @@ var backupMutationRoutes = []struct {
 }{
 	{"save destination", backupDestinationPath, validBackupDestinationForm},
 	{"test destination", backupDestinationTestPath, ""},
+	{"check destination", backupDestinationCheckPath, validBackupDestinationForm},
 	{"remove destination", backupDestinationRemovePath, ""},
 	{"save schedule", backupSchedulePath, "weekday=mon&time=03:00&timezone=UTC&enabled=on"},
 	{"back up now", backupRunPath, ""},

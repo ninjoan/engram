@@ -116,6 +116,14 @@ templ backupDestinationBlock(v BackupsPageView) {
 		<p class="section-kicker" id="backup-destination-title">DESTINATION</p>
 		if v.Destination.Configured {
 			@backupDestinationSummary(v)
+		} else if v.wizardVisible() {
+			<div class="backup-dest-head">
+				<div>
+					<h4>Set up an off-site destination</h4>
+					<p class="muted">No destination is configured. Nothing is uploaded off this server yet; <strong>Download backup</strong> above still works. Setup takes about two minutes: have your bucket name and an access key pair ready.</p>
+				</div>
+				@StatusBadge("Not configured", "muted")
+			</div>
 		} else {
 			<div class="backup-dest-head">
 				<div>
@@ -135,6 +143,9 @@ templ backupDestinationBlock(v BackupsPageView) {
 				</p>
 			</div>
 		}
+		if v.Destination.Configured && v.DestinationCheck.Result != "" {
+			@BackupDestinationCheckResult(v.DestinationCheck)
+		}
 		if v.settingsFormsVisible() {
 			if v.Destination.Configured {
 				<details class="backup-change" open?={ v.destinationFormOpen() }>
@@ -150,7 +161,7 @@ templ backupDestinationBlock(v BackupsPageView) {
 					</details>
 				</details>
 			} else {
-				@backupDestinationForm(v)
+				@backupDestinationWizard(v)
 			}
 		}
 	</section>
@@ -261,7 +272,7 @@ templ backupWhen(t time.Time, now time.Time) {
 // reads endpoint, region, bucket, prefix and both credentials.
 templ backupDestinationForm(v BackupsPageView) {
 	<form method="post" action="/dashboard/admin/backups/destination" class="backup-provider-form" autocomplete="off">
-		if v.DestinationForm.Submitted {
+		if v.destinationSaveRefused() {
 			<div class="alert alert-danger" role="alert">
 				<p>
 					<strong>Destination not saved.</strong>
@@ -367,6 +378,209 @@ templ backupDestinationForm(v BackupsPageView) {
 			<button type="submit">Save destination</button>
 		</div>
 	</form>
+}
+
+// backupDestinationWizard is the first-time guided setup: Provider,
+// Connection, Credentials, Test & save, with a running summary. It is one
+// plain POST form to the save route with a single "Save destination"
+// submit, so without JavaScript the four steps render as four sections.
+// backups-wizard.js (loaded only here) shows one step at a time, checks the
+// required fields of each step, and reveals Back, Next and "Test
+// connection", which asks the check route about the submitted fields
+// without saving them. The script element sits in this component so no
+// other page loads it.
+templ backupDestinationWizard(v BackupsPageView) {
+	<form method="post" action="/dashboard/admin/backups/destination" class="backup-wizard" autocomplete="off" data-backup-wizard data-wizard-start={ v.wizardStartStep() }>
+		if v.destinationSaveRefused() {
+			<div class="alert alert-danger" role="alert">
+				<p>
+					<strong>Destination not saved.</strong>
+					if reason := v.destinationErrorUnplaced(); reason != "" {
+						{ reason + "." }
+					} else {
+						Fix the field marked below.
+					}
+					Your keys were not stored: paste both again.
+				</p>
+			</div>
+		}
+		<ol class="backup-stepper" aria-label="Setup progress">
+			for _, step := range backupWizardSteps {
+				<li data-wizard-stepper-item={ step.Number }>
+					<a href={ templ.SafeURL("#backup-wizard-step-" + step.Number) } data-wizard-goto={ step.Number }>
+						<span class="backup-stepper-dot" aria-hidden="true">{ step.Number }</span>
+						<span class="backup-stepper-name">{ step.Name }</span>
+						<span class="backup-stepper-sub" data-wizard-stepper-sub={ step.Number }>{ step.Sub }</span>
+					</a>
+				</li>
+			}
+		</ol>
+		<div class="backup-wizard-body">
+			<div class="backup-wizard-steps">
+				<fieldset class="backup-step-panel" id="backup-wizard-step-1" data-wizard-step="1">
+					<legend><h5 class="backup-step-title" id="backup-wizard-step-1-title" tabindex="-1">Step 1 of 4 · Provider</h5></legend>
+					<p class="hint">Where should the archives go? The choice fills in the endpoint and region hints; it is not stored.</p>
+					<div class="backup-plist">
+						for _, p := range backupProviders {
+							<label class="backup-prow">
+								<input type="radio" name="provider" value={ p.ID } id={ "backup-provider-" + p.ID } checked?={ v.selectedBackupProvider() == p.ID } data-provider-name={ p.Name } data-endpoint-placeholder={ p.EndpointPlaceholder } data-region-placeholder={ p.RegionPlaceholder }/>
+								@backupProviderMark(p)
+								<span class="backup-prow-name">{ p.Name }</span>
+								<span class="backup-prow-pattern">{ p.Pattern }</span>
+								<span class="backup-prow-region">{ "region " + p.RegionPlaceholder }</span>
+							</label>
+						}
+					</div>
+					@backupProviderGuide()
+					<div class="backup-step-nav">
+						<span class="muted">You can also skip this and fill in the fields directly.</span>
+						<button type="button" data-wizard-next hidden>Continue to connection →</button>
+					</div>
+				</fieldset>
+				<fieldset class="backup-step-panel" id="backup-wizard-step-2" data-wizard-step="2">
+					<legend><h5 class="backup-step-title" id="backup-wizard-step-2-title" tabindex="-1">Step 2 of 4 · Connection</h5></legend>
+					<p class="hint">How Engram reaches the storage service, and where in it the archives land.</p>
+					<div class="backup-wizard-fields is-wide">
+						<div class="backup-field">
+							<label for="backup-endpoint">Endpoint</label>
+							<input type="text" id="backup-endpoint" name="endpoint" value={ v.destinationFormValue("endpoint") } placeholder={ v.placeholderBackupProvider().EndpointPlaceholder } class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("endpoint", "backup-endpoint", true)... }/>
+							@backupFieldError(v.destinationFieldError("endpoint"), "backup-endpoint")
+							<span class="hint" id="backup-endpoint-hint">Origin only, starting with <code>https://</code>; plain <code>http://</code> only for localhost and loopback addresses.</span>
+						</div>
+						<div class="backup-field">
+							<label for="backup-region">Region</label>
+							<input type="text" id="backup-region" name="region" value={ v.destinationFormValue("region") } placeholder={ v.placeholderBackupProvider().RegionPlaceholder } list="backup-region-suggestions" class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("region", "backup-region", true)... }/>
+							<datalist id="backup-region-suggestions">
+								for _, region := range backupRegionSuggestions {
+									<option value={ region }></option>
+								}
+							</datalist>
+							@backupFieldError(v.destinationFieldError("region"), "backup-region")
+							<span class="hint" id="backup-region-hint">Cloudflare R2 uses <code>auto</code>; other providers use the bucket's region.</span>
+						</div>
+					</div>
+					<div class="backup-wizard-fields">
+						<div class="backup-field">
+							<label for="backup-bucket">Bucket</label>
+							<input type="text" id="backup-bucket" name="bucket" value={ v.destinationFormValue("bucket") } placeholder="engram-backups" class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("bucket", "backup-bucket", true)... }/>
+							@backupFieldError(v.destinationFieldError("bucket"), "backup-bucket")
+							<span class="hint" id="backup-bucket-hint">3–63 lowercase letters, digits, dots or hyphens.</span>
+						</div>
+						<div class="backup-field">
+							<label for="backup-prefix">Prefix <span class="muted">(optional)</span></label>
+							<input type="text" id="backup-prefix" name="prefix" value={ v.destinationFormValue("prefix") } placeholder="engram/prod/" class="mono-input" spellcheck="false" { v.destinationFieldAttrs("prefix", "backup-prefix", true)... }/>
+							@backupFieldError(v.destinationFieldError("prefix"), "backup-prefix")
+							<span class="hint" id="backup-prefix-hint">A folder inside the bucket. No leading <code>/</code>.</span>
+						</div>
+					</div>
+					<div class="backup-path-preview">
+						<p class="section-kicker">Backups will be saved as</p>
+						<p class="backup-path"><span class="backup-path-bucket">{ backupPathBucket(v.destinationFormValue("bucket")) }</span>/<span class="backup-path-prefix">{ backupPathPrefix(v.destinationFormValue("prefix")) }</span><span class="backup-path-file">{ "engram-cloud-backup-<UTC timestamp>-run<id>.tar.gz" }</span></p>
+						<p class="hint">One object per run: UTC time plus run number, so runs never overwrite each other.</p>
+					</div>
+					<div class="backup-step-nav">
+						<button type="button" class="secondary" data-wizard-back hidden>← Back</button>
+						<button type="button" data-wizard-next hidden>Continue to credentials →</button>
+					</div>
+				</fieldset>
+				<fieldset class="backup-step-panel" id="backup-wizard-step-3" data-wizard-step="3">
+					<legend><h5 class="backup-step-title" id="backup-wizard-step-3-title" tabindex="-1">Step 3 of 4 · Credentials</h5></legend>
+					<p class="hint">An access key pair from your provider that can list and write objects in this bucket.</p>
+					<div class="backup-keys-callout">
+						<span class="backup-keys-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"></rect><path d="M5.5 7V5a2.5 2.5 0 015 0v2" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg></span>
+						<div>
+							<p><strong>Your keys are sealed, then forgotten by the screen.</strong> Engram encrypts them with this server's backup key, bound to this exact endpoint, region, bucket and prefix. Nobody can view them again, not even admins.</p>
+							<p>That is why every save asks for both keys, even for a small change. Keep a copy in your password manager.</p>
+						</div>
+					</div>
+					<div class="backup-wizard-fields">
+						<div class="backup-field">
+							<label for="backup-access-key-id">Access key id</label>
+							<input type="text" id="backup-access-key-id" name="access_key_id" value="" autocomplete="off" spellcheck="false" placeholder="Paste from your provider" class="mono-input" required { v.destinationFieldAttrs("access_key_id", "backup-access-key-id", false)... }/>
+							@backupFieldError(v.destinationFieldError("access_key_id"), "backup-access-key-id")
+						</div>
+						<div class="backup-field">
+							<label for="backup-secret-access-key">Secret access key</label>
+							<input type="password" id="backup-secret-access-key" name="secret_access_key" value="" autocomplete="new-password" placeholder="Paste from your provider" required { v.destinationFieldAttrs("secret_access_key", "backup-secret-access-key", false)... }/>
+							@backupFieldError(v.destinationFieldError("secret_access_key"), "backup-secret-access-key")
+						</div>
+					</div>
+					<div class="backup-step-nav">
+						<button type="button" class="secondary" data-wizard-back hidden>← Back</button>
+						<button type="button" data-wizard-next hidden>Review &amp; test →</button>
+					</div>
+				</fieldset>
+				<fieldset class="backup-step-panel" id="backup-wizard-step-4" data-wizard-step="4">
+					<legend><h5 class="backup-step-title" id="backup-wizard-step-4-title" tabindex="-1">Step 4 of 4 · Test &amp; save</h5></legend>
+					<p class="hint">Check the summary, then save. <span data-wizard-js-only hidden><strong>Test connection</strong> asks the bucket with these keys first and stores nothing.</span></p>
+					<div id="backup-wizard-result" class="backup-wizard-result" aria-live="polite">
+						if v.DestinationCheck.Result != "" {
+							@BackupDestinationCheckResult(v.DestinationCheck)
+						}
+					</div>
+					<div class="backup-step-nav">
+						<button type="button" class="secondary" data-wizard-back hidden>← Back</button>
+						<div class="backup-step-actions">
+							<button type="button" class="secondary" data-wizard-check hidden hx-post="/dashboard/admin/backups/destination/check" hx-trigger="backup-wizard-check" hx-target="#backup-wizard-result" hx-swap="innerHTML" hx-disabled-elt="this">Test connection</button>
+							<button type="submit">Save destination</button>
+						</div>
+					</div>
+					<p class="muted backup-wizard-save-note">Saving stores the destination; it does not upload anything.</p>
+				</fieldset>
+			</div>
+			<aside class="backup-rail" aria-label="Setup summary">
+				<h5>Your destination</h5>
+				<dl>
+					@backupWizardSummaryRow("Provider", "provider", "1", v.wizardProviderName(), "not chosen")
+					@backupWizardSummaryRow("Endpoint", "endpoint", "2", v.wizardSummaryValue("endpoint"), "not set yet")
+					@backupWizardSummaryRow("Region", "region", "2", v.wizardSummaryValue("region"), "not set yet")
+					@backupWizardSummaryRow("Bucket", "bucket", "2", v.wizardSummaryValue("bucket"), "not set yet")
+					@backupWizardSummaryRow("Prefix", "prefix", "2", backupPathPrefix(v.wizardSummaryValue("prefix")), "none")
+					@backupWizardSummaryRow("Keys", "keys", "3", "", "paste in step 3")
+				</dl>
+			</aside>
+		</div>
+	</form>
+	<script src="/dashboard/static/backups-wizard.js" defer></script>
+}
+
+// backupWizardSummaryRow is one line of the setup summary. The script keeps
+// it in sync with the form; the keys row only ever says whether both keys
+// are filled in, never their value.
+templ backupWizardSummaryRow(label, field, step, value, pending string) {
+	<div>
+		<dt>{ label } <a href={ templ.SafeURL("#backup-wizard-step-" + step) } class="backup-rail-edit" data-wizard-goto={ step }>Edit<span class="visually-hidden">{ " " + label }</span></a></dt>
+		if value != "" {
+			<dd data-wizard-summary={ field } data-pending={ pending }>{ value }</dd>
+		} else {
+			<dd data-wizard-summary={ field } data-pending={ pending } class="is-pending">{ pending }</dd>
+		}
+	</div>
+}
+
+// BackupDestinationCheckResult is the result of checking submitted,
+// unsaved destination fields: the HTMX fragment of the check route and the
+// step 4 slot of the guided setup. Its texts are fixed; only a validation
+// reason (a fixed string that never echoes a value) is shown. An unknown
+// result renders nothing.
+templ BackupDestinationCheckResult(c BackupDestinationCheck) {
+	if m := c.message(); m.Title != "" {
+		<div class={ backupAlertClass(m.Kind) } role={ m.role() } data-check-result={ c.Result }>
+			<p>
+				<strong>{ m.Title }</strong>
+				{ m.Detail }
+				if m.Kind == "success" {
+					<span class="muted">Nothing is saved yet: press <strong>Save destination</strong> to keep it.</span>
+				} else {
+					<span class="muted">Nothing was saved.</span>
+				}
+				if m.Step != "" {
+					{ " " }
+					<a href={ templ.SafeURL("#backup-wizard-step-" + m.Step) } data-wizard-goto={ m.Step }>{ m.StepLabel }</a>
+				}
+			</p>
+		</div>
+	}
 }
 
 // backupFieldError renders a field's validation reason, referenced by the

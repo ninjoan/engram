@@ -37,6 +37,8 @@ const (
 	// recorded by cloudstore in the same transaction as the change.
 	authAuditActionBackupDestinationTest = "backup.destination.test"
 	authAuditActionBackupRunManual       = "backup.run.manual"
+	// backup.destination.check is a test of submitted, unsaved fields.
+	authAuditActionBackupDestinationCheck = "backup.destination.check"
 )
 
 // AdminIdentityStore is the storage boundary used by cloudserver admin API

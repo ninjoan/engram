@@ -1925,16 +1925,24 @@ td:not(:first-child) p,
 
 	.backup-provider-guide [data-provider-guide="none"],
 	.backup-provider-form:has(#backup-provider-r2:checked) [data-provider-guide="r2"],
+	.backup-wizard:has(#backup-provider-r2:checked) [data-provider-guide="r2"],
 	.backup-provider-form:has(#backup-provider-aws:checked) [data-provider-guide="aws"],
+	.backup-wizard:has(#backup-provider-aws:checked) [data-provider-guide="aws"],
 	.backup-provider-form:has(#backup-provider-b2:checked) [data-provider-guide="b2"],
+	.backup-wizard:has(#backup-provider-b2:checked) [data-provider-guide="b2"],
 	.backup-provider-form:has(#backup-provider-wasabi:checked) [data-provider-guide="wasabi"],
+	.backup-wizard:has(#backup-provider-wasabi:checked) [data-provider-guide="wasabi"],
 	.backup-provider-form:has(#backup-provider-do:checked) [data-provider-guide="do"],
+	.backup-wizard:has(#backup-provider-do:checked) [data-provider-guide="do"],
 	.backup-provider-form:has(#backup-provider-minio:checked) [data-provider-guide="minio"],
-	.backup-provider-form:has(#backup-provider-other:checked) [data-provider-guide="other"] {
+	.backup-wizard:has(#backup-provider-minio:checked) [data-provider-guide="minio"],
+	.backup-provider-form:has(#backup-provider-other:checked) [data-provider-guide="other"],
+	.backup-wizard:has(#backup-provider-other:checked) [data-provider-guide="other"] {
 		display: block;
 	}
 
-	.backup-provider-form:has(input[name="provider"]:checked) [data-provider-guide="none"] {
+	.backup-provider-form:has(input[name="provider"]:checked) [data-provider-guide="none"],
+	.backup-wizard:has(input[name="provider"]:checked) [data-provider-guide="none"] {
 		display: none;
 	}
 }
@@ -2501,5 +2509,476 @@ details.backup-change[open] > .hint {
 @media (prefers-reduced-motion: reduce) {
 	.backup-tile {
 		transition: none;
+	}
+}
+
+/* Guided setup (first-time destination). Without JavaScript the four steps
+   are four stacked sections; backups-wizard.js adds .is-stepped and shows one
+   step at a time with the stepper marking the active step (aria-current). */
+
+.backup-wizard > .alert {
+	margin: 0 0 1rem;
+}
+
+.backup-wizard fieldset {
+	border: 0;
+	margin: 0;
+	min-width: 0;
+}
+
+.backup-wizard legend {
+	padding: 0;
+}
+
+.backup-stepper {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	margin: 0 0 1rem;
+	padding: 0;
+	list-style: none;
+}
+
+.backup-stepper li {
+	position: relative;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.backup-stepper li::after {
+	content: "";
+	position: absolute;
+	left: 2.6rem;
+	right: 0.6rem;
+	top: 1.85rem;
+	height: 1px;
+	background: var(--engram-border);
+}
+
+.backup-stepper li:last-child::after {
+	display: none;
+}
+
+.backup-stepper li.is-done::after {
+	background: rgba(240, 149, 200, 0.5);
+}
+
+.backup-stepper a {
+	display: grid;
+	grid-template-columns: 2rem minmax(0, 1fr);
+	gap: 0.1rem 0.7rem;
+	align-items: center;
+	padding: 0.85rem 1rem 0.85rem 0;
+	color: inherit;
+	text-decoration: none;
+}
+
+.backup-stepper-dot {
+	position: relative;
+	z-index: 1;
+	display: grid;
+	place-items: center;
+	width: 2rem;
+	height: 2rem;
+	grid-row: span 2;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-full);
+	background: var(--engram-surface);
+	color: var(--engram-muted);
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	font-weight: 700;
+}
+
+.backup-stepper-name {
+	position: relative;
+	z-index: 1;
+	width: fit-content;
+	padding-right: 0.5rem;
+	background: rgba(26, 18, 24, 0.95);
+	color: var(--engram-text-soft);
+	font-weight: 600;
+	font-size: 0.9rem;
+	line-height: 1.25;
+}
+
+.backup-stepper-sub {
+	font-family: var(--font-mono);
+	font-size: 0.74rem;
+	line-height: 1.3;
+	color: var(--engram-muted);
+	overflow-wrap: anywhere;
+}
+
+.backup-stepper li.is-done .backup-stepper-dot {
+	border-color: var(--engram-primary);
+	color: var(--engram-primary);
+}
+
+.backup-stepper li[aria-current="step"] .backup-stepper-dot {
+	border-color: var(--engram-primary);
+	background: var(--engram-primary);
+	color: var(--st-base);
+}
+
+.backup-stepper li[aria-current="step"] .backup-stepper-name {
+	color: var(--st-pink);
+}
+
+.backup-stepper a:hover .backup-stepper-name {
+	color: var(--engram-text);
+}
+
+.backup-wizard-body {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 20rem;
+	gap: 1.5rem;
+	align-items: start;
+}
+
+.backup-wizard-steps {
+	display: grid;
+	gap: 1rem;
+}
+
+.backup-wizard .backup-step-panel {
+	padding: 1.4rem;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-medium);
+	background: var(--engram-surface);
+}
+
+.backup-wizard .backup-step-panel > legend {
+	float: left;
+	width: 100%;
+}
+
+.backup-wizard .backup-step-panel > legend + * {
+	clear: both;
+}
+
+.backup-step-title {
+	margin: 0 0 0.2rem;
+	font-size: 1.05rem;
+	letter-spacing: -0.01em;
+}
+
+.backup-step-title:focus {
+	outline: none;
+}
+
+.backup-step-title:focus-visible {
+	outline: 2px solid var(--engram-primary);
+	outline-offset: 2px;
+}
+
+.backup-step-panel > p.hint {
+	margin: 0 0 1.1rem;
+}
+
+.backup-wizard .backup-field input {
+	background: var(--engram-base);
+}
+
+.backup-wizard .mono-input {
+	font-family: var(--font-mono);
+	font-size: 0.88rem;
+}
+
+.backup-wizard .field-error {
+	display: block;
+	color: var(--engram-danger);
+	font-size: 0.84rem;
+	line-height: 1.5;
+}
+
+.backup-wizard-fields {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	gap: 0.85rem 1rem;
+	margin-bottom: 1rem;
+}
+
+.backup-wizard-fields.is-wide {
+	grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+}
+
+.backup-plist {
+	display: grid;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-medium);
+	overflow: hidden;
+}
+
+.backup-prow {
+	display: grid;
+	grid-template-columns: 1.25rem 40px minmax(0, 13rem) minmax(0, 1fr) 7rem;
+	gap: 0.85rem;
+	align-items: center;
+	min-height: 3.25rem;
+	margin: 0;
+	padding: 0.55rem 1rem;
+	border-bottom: 1px solid var(--tm-border-soft);
+	background: var(--engram-base);
+	cursor: pointer;
+	transition: background 150ms ease;
+}
+
+.backup-prow:last-child {
+	border-bottom: 0;
+}
+
+.backup-prow:hover,
+.backup-prow:has(input:checked) {
+	background: rgba(240, 149, 200, 0.05);
+}
+
+.backup-prow:has(input:checked) {
+	box-shadow: inset 2px 0 0 var(--engram-primary);
+}
+
+.backup-prow input[type="radio"] {
+	width: 1rem;
+	height: 1rem;
+	margin: 0;
+	accent-color: var(--engram-primary);
+}
+
+.backup-prow-name {
+	font-weight: 600;
+	font-size: 0.92rem;
+}
+
+.backup-prow-pattern {
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+	color: var(--engram-text-soft);
+	overflow-wrap: anywhere;
+}
+
+.backup-prow-region {
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+	color: var(--engram-muted);
+	text-align: right;
+}
+
+.backup-wizard .backup-path-preview {
+	background: var(--tm-surface);
+}
+
+.backup-keys-callout {
+	display: grid;
+	grid-template-columns: 2.25rem minmax(0, 1fr);
+	gap: 0.85rem;
+	align-items: start;
+	margin-bottom: 1.2rem;
+	padding: 0.95rem 1rem;
+	border: 1px solid var(--tm-border);
+	border-left: 2px solid var(--engram-info);
+	border-radius: var(--shape-medium);
+	background: var(--tm-surface);
+}
+
+.backup-keys-icon {
+	display: grid;
+	place-items: center;
+	width: 2.25rem;
+	height: 2.25rem;
+	border-radius: var(--shape-full);
+	background: var(--engram-surface-raised);
+	color: var(--engram-info);
+}
+
+.backup-keys-callout p {
+	margin: 0 0 0.35rem;
+	color: var(--engram-text-soft);
+	font-size: 0.9rem;
+}
+
+.backup-keys-callout p:last-child {
+	margin: 0;
+}
+
+.backup-keys-callout strong {
+	color: var(--engram-text);
+}
+
+.backup-step-nav {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-between;
+	align-items: center;
+	gap: 1rem;
+	margin-top: 1.4rem;
+	padding-top: 1.1rem;
+	border-top: 1px solid var(--tm-border-soft);
+}
+
+.backup-step-nav .muted {
+	margin: 0;
+}
+
+.backup-step-nav button,
+.backup-step-actions button {
+	width: auto;
+	margin: 0;
+}
+
+.backup-step-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.65rem;
+	margin-left: auto;
+}
+
+.backup-wizard-result:empty {
+	display: none;
+}
+
+.backup-wizard-result .alert {
+	margin: 0;
+}
+
+.backup-wizard-result .alert a {
+	white-space: nowrap;
+}
+
+.backup-wizard-save-note {
+	margin: 0.75rem 0 0;
+}
+
+.backup-rail {
+	position: sticky;
+	top: 1rem;
+	display: grid;
+	gap: 0.9rem;
+	padding: 1.1rem;
+	border: 1px solid var(--tm-border);
+	border-radius: var(--shape-medium);
+	background: var(--tm-surface);
+}
+
+.backup-rail h5 {
+	margin: 0;
+	font-size: 0.72rem;
+	font-weight: 400;
+	letter-spacing: 0.18em;
+	text-transform: uppercase;
+	color: var(--st-pink);
+}
+
+.backup-rail dl {
+	display: grid;
+	gap: 0.55rem;
+	margin: 0;
+}
+
+.backup-rail dt {
+	font-size: 0.72rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--engram-muted);
+}
+
+.backup-rail dd {
+	margin: 0;
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+	overflow-wrap: anywhere;
+}
+
+.backup-rail dd.is-pending {
+	color: var(--engram-muted);
+	font-family: var(--font-sans);
+	font-style: italic;
+}
+
+.backup-rail-edit {
+	margin-left: 0.4rem;
+	font-size: 0.8rem;
+	letter-spacing: 0;
+	text-transform: none;
+}
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+.backup-wizard.is-stepped .backup-step-panel:not([hidden]) {
+	animation: backup-step-in 160ms var(--shape-easing);
+}
+
+@keyframes backup-step-in {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+}
+
+@media (max-width: 900px) {
+	.backup-stepper {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.backup-stepper li::after {
+		display: none;
+	}
+
+	.backup-wizard-body,
+	.backup-wizard-fields,
+	.backup-wizard-fields.is-wide {
+		grid-template-columns: 1fr;
+	}
+
+	.backup-rail {
+		position: static;
+	}
+
+	.backup-prow {
+		grid-template-columns: 1.25rem 40px minmax(0, 1fr);
+	}
+
+	.backup-prow-pattern {
+		grid-column: 3;
+	}
+
+	.backup-prow-region {
+		display: none;
+	}
+}
+
+@media (max-width: 560px) {
+	.backup-stepper {
+		grid-template-columns: 1fr;
+	}
+
+	.backup-wizard .backup-step-panel {
+		padding: 1rem;
+	}
+
+	.backup-step-nav {
+		flex-direction: column-reverse;
+		align-items: stretch;
+	}
+
+	.backup-step-actions {
+		flex-direction: column-reverse;
+		margin-left: 0;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.backup-prow {
+		transition: none;
+	}
+
+	.backup-wizard.is-stepped .backup-step-panel:not([hidden]) {
+		animation: none;
 	}
 }

@@ -378,6 +378,7 @@ func (s *CloudServer) routes() {
 		"/dashboard/admin/backups/destination":        s.handleDashboardSaveBackupDestination,
 		"/dashboard/admin/backups/destination/test":   s.handleDashboardTestBackupDestination,
 		"/dashboard/admin/backups/destination/remove": s.handleDashboardRemoveBackupDestination,
+		"/dashboard/admin/backups/destination/check":  s.handleDashboardCheckBackupDestination,
 		"/dashboard/admin/backups/schedule":           s.handleDashboardSaveBackupSchedule,
 		"/dashboard/admin/backups/run":                s.handleDashboardBackupNow,
 	} {
