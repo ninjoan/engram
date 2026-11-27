@@ -83,6 +83,14 @@ type BackupsPageView struct {
 	Notice    BackupsNotice
 	// DestinationForm re-renders a refused destination save.
 	DestinationForm BackupDestinationForm
+	// DestinationTest is the newest connection test since the destination
+	// was last saved; zero when it was not tested since.
+	DestinationTest cloudstore.BackupDestinationTest
+	// LastRuns is the newest successful and the newest failed run.
+	LastRuns cloudstore.BackupRunOutcomes
+	// Now is the time relative times are measured from; zero uses the
+	// wall clock.
+	Now time.Time
 }
 
 func (v BackupsPageView) settingsFormsVisible() bool {
@@ -425,6 +433,92 @@ func (v BackupsPageView) destinationErrorUnplaced() string {
 		return ""
 	}
 	return v.DestinationForm.Error
+}
+
+// backupObjectNamePattern is the object name of each run, as built by
+// s3client.BackupRunObjectKey.
+const backupObjectNamePattern = "engram-cloud-backup-<yyyymmddThhmmssZ>-run<id>.tar.gz"
+
+// backupDestinationStatus is the status pill of a configured destination.
+// Class selects the pill's color and shape, so it never relies on color
+// alone; Title and Detail explain a failing test.
+type backupDestinationStatus struct {
+	Class  string
+	Label  string
+	Title  string
+	Detail string
+}
+
+// backupTestFailures maps a backup.destination.test reason code to a short
+// title and the next step. The texts are fixed; nothing from the provider's
+// answer is shown.
+var backupTestFailures = map[string]backupDestinationStatus{
+	"auth_failed":         {Title: "Keys rejected.", Detail: "The provider refused the access key or its permissions. Save the destination with a key pair that can list and write objects in this bucket."},
+	"bucket_not_found":    {Title: "Bucket not found.", Detail: "The bucket does not exist at this endpoint. Check the bucket name and the endpoint (for Cloudflare R2, the account id)."},
+	"network":             {Title: "Endpoint unreachable.", Detail: "Network error or no answer within 15 s. Check DNS and the firewall from this server, then test again."},
+	"key_mismatch":        {Title: "Saved keys cannot be opened.", Detail: "ENGRAM_CLOUD_BACKUP_KEY changed since they were saved. Save the destination again with both keys."},
+	"unexpected_response": {Title: "Unexpected response.", Detail: "The destination answered in a way Engram does not recognize. Check the endpoint and the region."},
+}
+
+// destinationStatus is Locked without ENGRAM_CLOUD_BACKUP_KEY, Not tested
+// when no test was recorded since the last save, else Connected or Failing
+// from the newest test.
+func (v BackupsPageView) destinationStatus() backupDestinationStatus {
+	switch {
+	case v.Settings == BackupSettingsKeyMissing:
+		return backupDestinationStatus{Class: "is-locked", Label: "Locked"}
+	case !v.DestinationTest.Tested():
+		return backupDestinationStatus{Class: "is-untested", Label: "Not tested"}
+	case v.DestinationTest.Succeeded:
+		return backupDestinationStatus{Class: "is-connected", Label: "Connected"}
+	}
+	status, ok := backupTestFailures[v.DestinationTest.ReasonCode]
+	if !ok {
+		status = backupDestinationStatus{Title: "Connection test failed.", Detail: "Check the destination and test again."}
+	}
+	status.Class, status.Label = "is-failing", "Failing"
+	return status
+}
+
+func (v BackupsPageView) now() time.Time {
+	if v.Now.IsZero() {
+		return time.Now()
+	}
+	return v.Now
+}
+
+// lastFailureVisible shows the newest failed run when no run succeeded
+// after it.
+func (v BackupsPageView) lastFailureVisible() bool {
+	failure, success := v.LastRuns.LastFailure, v.LastRuns.LastSuccess
+	return failure.ID != 0 && (success.ID == 0 || failure.FinishedAt.After(success.FinishedAt))
+}
+
+// backupRelativeTime says how long ago t was, in whole minutes, hours or
+// days; a time in the future (clock skew) reads as "just now".
+func backupRelativeTime(t, now time.Time) string {
+	d := now.Sub(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return strconv.Itoa(int(d/time.Minute)) + " min ago"
+	case d < 24*time.Hour:
+		return strconv.Itoa(int(d/time.Hour)) + " h ago"
+	}
+	if days := int(d / (24 * time.Hour)); days > 1 {
+		return strconv.Itoa(days) + " days ago"
+	}
+	return "1 day ago"
+}
+
+// backupUTCLabel is the absolute time shown next to a relative one.
+func backupUTCLabel(t time.Time) string {
+	return "(" + t.UTC().Format("2006-01-02 15:04") + " UTC)"
+}
+
+func backupTimeAttr(t time.Time) string {
+	return t.UTC().Format(time.RFC3339)
 }
 
 // backupPathPrefix renders a key prefix the way object keys are built:

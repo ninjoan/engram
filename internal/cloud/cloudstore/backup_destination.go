@@ -26,6 +26,11 @@ const (
 
 	AuthAuditActionBackupDestinationUpdate = "backup.destination.update"
 	AuthAuditActionBackupDestinationClear  = "backup.destination.clear"
+	// AuthAuditActionBackupDestinationTest is recorded by the dashboard
+	// "Test connection" route: outcome success, or failure with a reason
+	// code (auth_failed, bucket_not_found, network, unexpected_response,
+	// key_mismatch, not_configured).
+	AuthAuditActionBackupDestinationTest = "backup.destination.test"
 
 	backupDestinationFieldAccessKeyID     = "access_key_id"
 	backupDestinationFieldSecretAccessKey = "secret_access_key"
@@ -83,6 +88,24 @@ type BackupDestination struct {
 	UpdatedAt            time.Time `json:"updated_at,omitzero"`
 }
 
+// BackupDestinationTest is the newest connection test of the current
+// destination, read from its backup.destination.test audit row. The zero
+// value means the destination was not tested since it was last saved.
+type BackupDestinationTest struct {
+	OccurredAt       time.Time
+	ActorPrincipalID string
+	// ActorName is the display name of the principal that ran the test.
+	ActorName string
+	Succeeded bool
+	// ReasonCode is the failure reason code; empty on success.
+	ReasonCode string
+}
+
+// Tested reports whether a test was recorded since the last save.
+func (t BackupDestinationTest) Tested() bool {
+	return !t.OccurredAt.IsZero()
+}
+
 // BackupDestinationCredentials is the opened destination, for the uploader
 // only. It formats and JSON-encodes without its credentials.
 type BackupDestinationCredentials struct {
@@ -130,6 +153,38 @@ func (cs *CloudStore) GetBackupDestination(ctx context.Context) (BackupDestinati
 	}
 	d.Configured = true
 	return d, nil
+}
+
+// LatestBackupDestinationTest returns the newest backup.destination.test
+// audit row recorded after the destination's updated_at, so saving the
+// destination again resets it. It is zero when no destination is stored or
+// none was tested since the last save. It reads only the audit columns and
+// never a credential.
+func (cs *CloudStore) LatestBackupDestinationTest(ctx context.Context) (BackupDestinationTest, error) {
+	if cs == nil || cs.db == nil {
+		return BackupDestinationTest{}, fmt.Errorf("cloudstore: not initialized")
+	}
+	var test BackupDestinationTest
+	var outcome string
+	err := cs.db.QueryRowContext(ctx, `
+		SELECT a.occurred_at, COALESCE(a.actor_principal_id::text, ''), COALESCE(p.display_name, ''), a.outcome, COALESCE(a.reason_code, '')
+		FROM cloud_auth_audit_log a
+		JOIN cloud_backup_destinations d ON d.id = 1
+		LEFT JOIN cloud_principals p ON p.id = a.actor_principal_id
+		WHERE a.action = $1 AND a.occurred_at > d.updated_at
+		ORDER BY a.occurred_at DESC, a.id DESC
+		LIMIT 1`, AuthAuditActionBackupDestinationTest).Scan(&test.OccurredAt, &test.ActorPrincipalID, &test.ActorName, &outcome, &test.ReasonCode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BackupDestinationTest{}, nil
+	}
+	if err != nil {
+		return BackupDestinationTest{}, fmt.Errorf("cloudstore: read latest backup destination test: %w", err)
+	}
+	test.Succeeded = outcome == "success"
+	if test.Succeeded {
+		test.ReasonCode = ""
+	}
+	return test, nil
 }
 
 // PutBackupDestination validates params, seals both credentials and stores

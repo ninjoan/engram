@@ -170,7 +170,7 @@ func TestAdminBackupsPageSelectsTileFromStoredEndpointHost(t *testing.T) {
 func TestAdminBackupsPageConfiguredCollapsesTilesBehindChangeDestination(t *testing.T) {
 	body := renderBackupsPageForTest(t, readyBackupsView(configuredR2Destination()))
 	for _, marker := range []string{
-		"badge badge-success\">Configured",
+		`<span class="backup-pill is-untested">Not tested</span>`,
 		`<p class="backup-summary-path">engram-backups/prod/</p>`,
 		"<dd><code>https://acct.r2.cloudflarestorage.com</code></dd>",
 		"<dd><code>****7f3a</code></dd>",

@@ -49,6 +49,9 @@ type fakeBackupSettingsStore struct {
 	schedule    cloudstore.BackupSchedule
 	runs        []cloudstore.BackupRun
 	readErr     error
+	latestTest  cloudstore.BackupDestinationTest
+	outcomes    cloudstore.BackupRunOutcomes
+	statusErr   error
 
 	putDestination    []cloudstore.PutBackupDestinationParams
 	putSealers        []cloudstore.BackupSecretSealer
@@ -136,6 +139,18 @@ func (f *fakeBackupSettingsStore) ListBackupRuns(_ context.Context, limit int) (
 		return nil, fmt.Errorf("unexpected history limit %d", limit)
 	}
 	return f.runs, f.readErr
+}
+
+func (f *fakeBackupSettingsStore) LatestBackupDestinationTest(context.Context) (cloudstore.BackupDestinationTest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.latestTest, f.statusErr
+}
+
+func (f *fakeBackupSettingsStore) LatestBackupRunOutcomes(context.Context) (cloudstore.BackupRunOutcomes, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.outcomes, f.statusErr
 }
 
 func (f *fakeBackupSettingsStore) mutations() int {

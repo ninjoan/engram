@@ -1,5 +1,7 @@
 package dashboard
 
+import "time"
+
 // AdminBackupsPage renders the admin Backups surface: the on-demand download,
 // the external destination and weekday/time schedule, "Back up now", the run
 // history, and what a backup archive contains and excludes.
@@ -103,11 +105,12 @@ templ backupScheduledSection(v BackupsPageView) {
 	}
 }
 
-// backupDestinationBlock renders the destination: a summary of the stored
-// destination (provider derived from its endpoint host, masked access key
-// id) with the form collapsed behind "Change destination", or the provider
-// tiles and grouped form when none is stored. Forms render only for managed
-// admins with the backup key set.
+// backupDestinationBlock renders the destination: the status card of the
+// stored destination (provider derived from its endpoint host, status pill,
+// where the next backup lands, masked access key id, last upload) with the
+// form and the remove confirm collapsed behind "Change destination", or the
+// provider tiles and grouped form when none is stored. Forms render only for
+// managed admins with the backup key set.
 templ backupDestinationBlock(v BackupsPageView) {
 	<section class="data-frame backup-destination" aria-labelledby="backup-destination-title">
 		<p class="section-kicker" id="backup-destination-title">DESTINATION</p>
@@ -136,8 +139,15 @@ templ backupDestinationBlock(v BackupsPageView) {
 			if v.Destination.Configured {
 				<details class="backup-change" open?={ v.destinationFormOpen() }>
 					<summary>Change destination</summary>
-					<p class="hint">The same provider tiles and grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save.</p>
+					<p class="hint">The same provider tiles and grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
 					@backupDestinationForm(v)
+					<details class="backup-danger-zone">
+						<summary>Remove destination…</summary>
+						<form method="post" action="/dashboard/admin/backups/destination/remove" class="backup-confirm">
+							<p>Stop uploading to <strong>{ v.Destination.Bucket }</strong>? The saved keys are deleted. Archives already in the bucket stay there. While the schedule stays enabled, each scheduled time is recorded as skipped until you add a destination.</p>
+							<button type="submit" class="backup-danger-fill">Remove destination</button>
+						</form>
+					</details>
 				</details>
 			} else {
 				@backupDestinationForm(v)
@@ -146,32 +156,104 @@ templ backupDestinationBlock(v BackupsPageView) {
 	</section>
 }
 
-// backupDestinationSummary shows the stored destination without any
-// credential: only the masked access key id hint.
+// backupDestinationSummary is the status card of the stored destination.
+// It never holds a credential: only the masked access key id hint. The pill
+// pairs a word with a shape (Connected, Not tested, Failing, Locked) and
+// comes from the newest backup.destination.test audit row since the last
+// save; "Test connection" is the only control and renders only for managed
+// admins with the backup key set.
 templ backupDestinationSummary(v BackupsPageView) {
 	<div class="backup-summary">
 		@backupProviderMark(v.configuredBackupProvider())
 		<div class="backup-summary-body">
-			<h4 class="backup-summary-title">{ v.configuredBackupProvider().Summary } @StatusBadge("Configured", "success")</h4>
+			<h4 class="backup-summary-title">{ v.configuredBackupProvider().Summary } <span class={ "backup-pill " + v.destinationStatus().Class }>{ v.destinationStatus().Label }</span></h4>
 			<p class="backup-summary-path">{ v.Destination.Bucket }/{ backupPathPrefix(v.Destination.Prefix) }</p>
-			<dl class="backup-facts">
-				<div><dt>Endpoint</dt><dd><code>{ v.Destination.Endpoint }</code></dd></div>
-				<div><dt>Region</dt><dd><code>{ v.Destination.Region }</code></dd></div>
-				<div><dt>Access key id</dt><dd><code>{ v.Destination.AccessKeyIDHint }</code></dd></div>
-				<div><dt>Updated</dt><dd>{ formatTimeValue(v.Destination.UpdatedAt) }</dd></div>
-			</dl>
+			@backupDestinationStatusMeta(v)
 		</div>
 		if v.settingsFormsVisible() {
 			<div class="backup-summary-actions">
 				<form method="post" action="/dashboard/admin/backups/destination/test" class="switch-form">
-					<button type="submit">Test connection</button>
-				</form>
-				<form method="post" action="/dashboard/admin/backups/destination/remove" class="switch-form">
-					<button type="submit" class="secondary backup-danger-button">Remove destination</button>
+					if v.DestinationTest.Tested() {
+						<button type="submit" class="secondary">Test again</button>
+					} else {
+						<button type="submit">Test connection</button>
+					}
 				</form>
 			</div>
 		}
 	</div>
+	if s := v.destinationStatus(); s.Title != "" {
+		<div class="backup-status-line"><p><strong>{ s.Title }</strong> { s.Detail }</p></div>
+	}
+	<div class="backup-path-strip" role="group" aria-label="Where the next backup lands">
+		<p class="backup-path-line">
+			<span class="backup-path-seg is-bucket"><small>Bucket</small><span class="backup-path-bucket">{ v.Destination.Bucket + "/" }</span></span>
+			if p := backupPathPrefix(v.Destination.Prefix); p != "" {
+				<span class="backup-path-seg is-prefix"><small>Prefix</small><span class="backup-path-prefix">{ p }</span></span>
+			}
+			<span class="backup-path-seg"><small>Object, one per run</small><span class="backup-path-file">{ backupObjectNamePattern }</span></span>
+		</p>
+	</div>
+	<dl class="backup-facts">
+		<div><dt>Endpoint</dt><dd><code>{ v.Destination.Endpoint }</code></dd></div>
+		<div><dt>Region</dt><dd><code>{ v.Destination.Region }</code></dd></div>
+		<div><dt>Access key id</dt><dd><code>{ v.Destination.AccessKeyIDHint }</code></dd></div>
+		<div><dt>Saved</dt><dd>{ formatTimeValue(v.Destination.UpdatedAt) }</dd></div>
+	</dl>
+	<dl class="backup-facts backup-run-facts">
+		<div>
+			<dt>Last upload</dt>
+			if run := v.LastRuns.LastSuccess; run.ID != 0 {
+				<dd>
+					@StatusBadge(run.Status, "success")
+					{ " " }
+					@backupWhen(run.FinishedAt, v.now())
+					{ " · " + formatBackupSize(run.SizeBytes) }
+					<span class="backup-run-key"><code>{ run.ObjectKey }</code></span>
+				</dd>
+			} else {
+				<dd>None yet</dd>
+			}
+		</div>
+		if v.lastFailureVisible() {
+			<div>
+				<dt>Last failure</dt>
+				<dd>
+					@StatusBadge(v.LastRuns.LastFailure.Status, "danger")
+					{ " " }
+					@backupWhen(v.LastRuns.LastFailure.FinishedAt, v.now())
+					<span class="backup-run-error">{ v.LastRuns.LastFailure.ErrorMessage }</span>
+				</dd>
+			</div>
+		}
+	</dl>
+}
+
+// backupDestinationStatusMeta is the line under the status pill: when and
+// by whom the destination was last tested, or what to do next.
+templ backupDestinationStatusMeta(v BackupsPageView) {
+	<p class="backup-status-meta">
+		switch {
+			case v.Settings == BackupSettingsKeyMissing:
+				The saved keys cannot be used or tested until <code>ENGRAM_CLOUD_BACKUP_KEY</code> is set.
+			case !v.DestinationTest.Tested():
+				Not tested since it was saved; the next backup is the first check that the saved keys reach the bucket.
+			default:
+				{ "Last tested " }
+				@backupWhen(v.DestinationTest.OccurredAt, v.now())
+				if v.DestinationTest.ActorName != "" {
+					{ " by " + v.DestinationTest.ActorName }
+				}
+				if v.DestinationTest.Succeeded {
+					{ " · the bucket was listed with the saved keys." }
+				}
+		}
+	</p>
+}
+
+// backupWhen renders a time as relative text with the absolute UTC time.
+templ backupWhen(t time.Time, now time.Time) {
+	<time datetime={ backupTimeAttr(t) }>{ backupRelativeTime(t, now) }</time> <span class="backup-when-utc">{ backupUTCLabel(t) }</span>
 }
 
 // backupDestinationForm is a plain POST form: the provider tiles are radios

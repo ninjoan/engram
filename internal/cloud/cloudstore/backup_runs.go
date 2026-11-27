@@ -262,6 +262,46 @@ func (cs *CloudStore) ListBackupRuns(ctx context.Context, limit int) ([]BackupRu
 	return runs, nil
 }
 
+// BackupRunOutcomes holds the newest finished run of each result. A zero ID
+// means there is no such run.
+type BackupRunOutcomes struct {
+	LastSuccess BackupRun
+	LastFailure BackupRun
+}
+
+// LatestBackupRunOutcomes returns the most recently finished successful run
+// and the most recently finished failed run; running rows never count.
+func (cs *CloudStore) LatestBackupRunOutcomes(ctx context.Context) (BackupRunOutcomes, error) {
+	if cs == nil || cs.db == nil {
+		return BackupRunOutcomes{}, fmt.Errorf("cloudstore: not initialized")
+	}
+	rows, err := cs.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (status) `+backupRunColumns+`
+		FROM cloud_backup_runs
+		WHERE status IN ('success', 'failure') AND finished_at IS NOT NULL
+		ORDER BY status, finished_at DESC, id DESC`)
+	if err != nil {
+		return BackupRunOutcomes{}, fmt.Errorf("cloudstore: read latest backup runs: %w", err)
+	}
+	defer rows.Close()
+	var outcomes BackupRunOutcomes
+	for rows.Next() {
+		run, err := scanBackupRun(rows)
+		if err != nil {
+			return BackupRunOutcomes{}, fmt.Errorf("cloudstore: scan backup run: %w", err)
+		}
+		if run.Status == BackupRunStatusSuccess {
+			outcomes.LastSuccess = run
+		} else {
+			outcomes.LastFailure = run
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return BackupRunOutcomes{}, fmt.Errorf("cloudstore: read latest backup runs: %w", err)
+	}
+	return outcomes, nil
+}
+
 type backupRunScanner interface {
 	Scan(dest ...any) error
 }

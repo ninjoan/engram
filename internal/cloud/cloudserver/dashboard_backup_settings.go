@@ -35,6 +35,10 @@ type BackupSettingsStore interface {
 	GetBackupSchedule(ctx context.Context) (cloudstore.BackupSchedule, error)
 	PutBackupSchedule(ctx context.Context, params cloudstore.PutBackupScheduleParams) error
 	ListBackupRuns(ctx context.Context, limit int) ([]cloudstore.BackupRun, error)
+	// LatestBackupDestinationTest and LatestBackupRunOutcomes feed the
+	// destination status card; neither reads a credential.
+	LatestBackupDestinationTest(ctx context.Context) (cloudstore.BackupDestinationTest, error)
+	LatestBackupRunOutcomes(ctx context.Context) (cloudstore.BackupRunOutcomes, error)
 }
 
 // BackupKey seals and opens destination credentials; *backupcrypto.Sealer
@@ -181,11 +185,18 @@ func (s *CloudServer) backupsPageView(r *http.Request) dashboard.BackupsPageView
 	if err == nil {
 		view.Runs, err = s.backupSettings.ListBackupRuns(ctx, cloudstore.DefaultBackupRunListLimit)
 	}
+	if err == nil && destination.Configured {
+		view.DestinationTest, err = s.backupSettings.LatestBackupDestinationTest(ctx)
+	}
+	if err == nil && destination.Configured {
+		view.LastRuns, err = s.backupSettings.LatestBackupRunOutcomes(ctx)
+	}
 	if err != nil {
 		log.Printf("[engram-cloud] backups page: read backup settings: %v", err)
 		return dashboard.BackupsPageView{CanManage: view.CanManage, Tables: view.Tables, Exclusions: view.Exclusions, Settings: dashboard.BackupSettingsUnavailable}
 	}
 	view.Destination = destination
+	view.Now = s.backupClock()
 	view.Settings = dashboard.BackupSettingsKeyMissing
 	if s.backupKey != nil {
 		view.Settings = dashboard.BackupSettingsReady
