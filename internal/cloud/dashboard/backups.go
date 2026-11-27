@@ -48,8 +48,8 @@ type BackupDestinationForm struct {
 	// Submitted is true when the form re-renders a refused save; otherwise
 	// the form is pre-filled from the stored destination.
 	Submitted bool
-	// Provider is the submitted provider tile; it is only a hint and an
-	// unknown value falls back to the provider derived from Endpoint.
+	// Provider is the submitted provider select value; it is only a hint
+	// and an unknown value falls back to the provider derived from Endpoint.
 	Provider string
 	Endpoint string
 	Region   string
@@ -306,30 +306,29 @@ func backupNoticeClass(kind string) string {
 	return "data-frame policy-note success-note"
 }
 
-// backupProvider is one provider tile of the destination form. The provider
-// is only a hint for the endpoint format: it is never stored, and the
-// configured destination's provider is derived from its endpoint host.
+// backupProvider is one option of the destination form's provider select.
+// The provider is only a hint for the endpoint format: it is never stored,
+// and the configured destination's provider is derived from its endpoint
+// host.
 type backupProvider struct {
 	ID string
-	// Name labels the tile; Summary names a configured destination.
+	// Name labels the option; Summary names a configured destination.
 	Name    string
 	Summary string
-	// Mark is the two-letter monogram drawn in the tile.
-	Mark string
-	// Pattern is the endpoint host pattern shown in the tile.
+	// Pattern is the endpoint host pattern shown in the provider's hint.
 	Pattern             string
 	EndpointPlaceholder string
 	RegionPlaceholder   string
 }
 
 var backupProviders = []backupProvider{
-	{ID: "r2", Name: "Cloudflare R2", Summary: "Cloudflare R2", Mark: "R2", Pattern: "<account-id>.r2.cloudflarestorage.com", EndpointPlaceholder: "https://<account-id>.r2.cloudflarestorage.com", RegionPlaceholder: "auto"},
-	{ID: "aws", Name: "Amazon S3", Summary: "Amazon S3", Mark: "S3", Pattern: "s3.<region>.amazonaws.com", EndpointPlaceholder: "https://s3.<region>.amazonaws.com", RegionPlaceholder: "us-east-1"},
-	{ID: "b2", Name: "Backblaze B2", Summary: "Backblaze B2", Mark: "B2", Pattern: "s3.<region>.backblazeb2.com", EndpointPlaceholder: "https://s3.<region>.backblazeb2.com", RegionPlaceholder: "us-west-004"},
-	{ID: "wasabi", Name: "Wasabi", Summary: "Wasabi", Mark: "Wa", Pattern: "s3.<region>.wasabisys.com", EndpointPlaceholder: "https://s3.<region>.wasabisys.com", RegionPlaceholder: "eu-central-1"},
-	{ID: "do", Name: "DigitalOcean Spaces", Summary: "DigitalOcean Spaces", Mark: "DO", Pattern: "<region>.digitaloceanspaces.com", EndpointPlaceholder: "https://<region>.digitaloceanspaces.com", RegionPlaceholder: "nyc3"},
-	{ID: "minio", Name: "MinIO / self-hosted", Summary: "MinIO / self-hosted", Mark: "Mi", Pattern: "your server's https URL", EndpointPlaceholder: "https://minio.example.com:9000", RegionPlaceholder: "us-east-1"},
-	{ID: "other", Name: "Other S3-compatible", Summary: "S3-compatible", Mark: "S3", Pattern: "any SigV4 endpoint over https", EndpointPlaceholder: "https://s3.example.com", RegionPlaceholder: "auto"},
+	{ID: "r2", Name: "Cloudflare R2", Summary: "Cloudflare R2", Pattern: "<account-id>.r2.cloudflarestorage.com", EndpointPlaceholder: "https://<account-id>.r2.cloudflarestorage.com", RegionPlaceholder: "auto"},
+	{ID: "aws", Name: "Amazon S3", Summary: "Amazon S3", Pattern: "s3.<region>.amazonaws.com", EndpointPlaceholder: "https://s3.<region>.amazonaws.com", RegionPlaceholder: "us-east-1"},
+	{ID: "b2", Name: "Backblaze B2", Summary: "Backblaze B2", Pattern: "s3.<region>.backblazeb2.com", EndpointPlaceholder: "https://s3.<region>.backblazeb2.com", RegionPlaceholder: "us-west-004"},
+	{ID: "wasabi", Name: "Wasabi", Summary: "Wasabi", Pattern: "s3.<region>.wasabisys.com", EndpointPlaceholder: "https://s3.<region>.wasabisys.com", RegionPlaceholder: "eu-central-1"},
+	{ID: "do", Name: "DigitalOcean Spaces", Summary: "DigitalOcean Spaces", Pattern: "<region>.digitaloceanspaces.com", EndpointPlaceholder: "https://<region>.digitaloceanspaces.com", RegionPlaceholder: "nyc3"},
+	{ID: "minio", Name: "MinIO / self-hosted", Summary: "MinIO / self-hosted", Pattern: "your server's https URL", EndpointPlaceholder: "https://minio.example.com:9000", RegionPlaceholder: "us-east-1"},
+	{ID: "other", Name: "Other S3-compatible", Summary: "S3-compatible", Pattern: "any SigV4 endpoint over https", EndpointPlaceholder: "https://s3.example.com", RegionPlaceholder: "auto"},
 }
 
 // backupRegionSuggestions are the example regions the provider guides name;
@@ -345,8 +344,8 @@ func lookupBackupProvider(id string) (backupProvider, bool) {
 	return backupProvider{}, false
 }
 
-// backupProviderForEndpoint derives the provider tile from an endpoint host:
-// known provider domains map to their tile, loopback hosts and hosts named
+// backupProviderForEndpoint derives the provider from an endpoint host:
+// known provider domains map to their provider, loopback hosts and hosts named
 // like MinIO to "minio", anything else to "other". An endpoint without a
 // host has no provider.
 func backupProviderForEndpoint(endpoint string) string {
@@ -377,8 +376,8 @@ func backupProviderForEndpoint(endpoint string) string {
 	return "other"
 }
 
-// selectedBackupProvider is the tile checked in the form: the submitted hint
-// when it is a known tile, else the provider of the endpoint in the form.
+// selectedBackupProvider is the provider the form names: the submitted hint
+// when it is a known provider, else the provider of the endpoint in the form.
 func (v BackupsPageView) selectedBackupProvider() string {
 	if v.DestinationForm.Submitted {
 		if _, ok := lookupBackupProvider(v.DestinationForm.Provider); ok {
@@ -397,9 +396,10 @@ func (v BackupsPageView) configuredBackupProvider() backupProvider {
 	return p
 }
 
-// placeholderBackupProvider picks the placeholders: the selected tile, or
-// Cloudflare R2 when none is selected.
-func (v BackupsPageView) placeholderBackupProvider() backupProvider {
+// pickedBackupProvider is the option the provider select shows, and the one
+// whose hint and placeholders render: the selected provider, or Cloudflare
+// R2 (the first option) when the form names none.
+func (v BackupsPageView) pickedBackupProvider() backupProvider {
 	p, ok := lookupBackupProvider(v.selectedBackupProvider())
 	if !ok {
 		p, _ = lookupBackupProvider("r2")
@@ -597,7 +597,7 @@ func backupPathBucket(bucket string) string {
 
 // wizardVisible renders the guided setup: only for the first-time state, a
 // managed admin with the backup key set and no destination. A configured
-// destination keeps the status card and the provider tiles behind "Change
+// destination keeps the status card and the grouped form behind "Change
 // destination".
 func (v BackupsPageView) wizardVisible() bool {
 	return v.settingsFormsVisible() && !v.Destination.Configured
@@ -656,14 +656,6 @@ var backupWizardSteps = []backupWizardStep{
 // the field is empty.
 func (v BackupsPageView) wizardSummaryValue(field string) string {
 	return strings.TrimSpace(v.destinationFormValue(field))
-}
-
-// wizardProviderName names the selected provider in the setup summary.
-func (v BackupsPageView) wizardProviderName() string {
-	if p, ok := lookupBackupProvider(v.selectedBackupProvider()); ok {
-		return p.Name
-	}
-	return ""
 }
 
 // backupCheckMessage is the fixed text of a check result. Step is the

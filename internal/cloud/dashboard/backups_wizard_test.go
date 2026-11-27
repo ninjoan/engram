@@ -55,9 +55,10 @@ func TestAdminBackupsPageEmptyStateRendersTheGuidedSetup(t *testing.T) {
 		`<aside class="backup-rail" aria-label="Setup summary">`, "Your destination",
 		"Set up an off-site destination", "No destination is configured.",
 		"badge badge-muted\">Not configured",
-		// Step 1 reuses the provider list, monograms and hints.
-		"Cloudflare R2", "&lt;account-id&gt;.r2.cloudflarestorage.com", `<svg class="backup-mark backup-mark-r2"`,
-		`data-provider-guide="r2"`, `data-provider-guide="other"`,
+		// Step 1 is the provider select with one hint line, defaulting to
+		// Cloudflare R2 like the placeholders.
+		`<select id="backup-provider" name="provider" aria-describedby="backup-provider-hint"`,
+		`<dd data-wizard-summary="provider" data-pending="not chosen">Cloudflare R2</dd>`,
 		// Step 2: connection and location with the path preview.
 		`name="endpoint"`, `name="region"`, `name="bucket"`, `name="prefix"`,
 		"Backups will be saved as", `<span class="backup-path-bucket">&lt;bucket&gt;</span>`,
@@ -70,9 +71,10 @@ func TestAdminBackupsPageEmptyStateRendersTheGuidedSetup(t *testing.T) {
 			t.Fatalf("expected wizard marker %q, body=%q", marker, body)
 		}
 	}
-	values, checked := backupProviderSelection(body)
-	if got, want := strings.Join(values, ","), "r2,aws,b2,wasabi,do,minio,other"; got != want || len(checked) != 0 {
-		t.Fatalf("provider list = %q checked %v, want %q with none checked", got, checked, want)
+	assertSingleProviderPicker(t, body, "r2")
+	step1, step2 := strings.Index(form, `data-wizard-step="1"`), strings.Index(form, `data-wizard-step="2"`)
+	if at := strings.Index(form, `id="backup-provider"`); at < step1 || at > step2 {
+		t.Fatalf("the provider select must be in step 1, form=%q", form)
 	}
 	if strings.Count(body, backupWizardScript) != 1 {
 		t.Fatalf("the wizard must load its script exactly once, body=%q", body)
@@ -137,18 +139,18 @@ func TestAdminBackupsPageWizardOnlyForTheEditableEmptyState(t *testing.T) {
 			t.Fatalf("a configured destination must not render %q", forbidden)
 		}
 	}
-	// Change destination keeps the 01 tiles form.
+	// Change destination keeps the 01 grouped form, with the provider select.
 	details := strings.Index(configured, `<details class="backup-change">`)
-	tiles := strings.Index(configured, `class="backup-provider-form"`)
-	if details < 0 || tiles < details || !strings.Contains(configured, `<div class="backup-tiles">`) {
-		t.Fatalf("Change destination must keep the provider tiles form, body=%q", configured)
+	form := strings.Index(configured, `class="backup-provider-form"`)
+	if details < 0 || form < details || strings.Index(configured, `<select id="backup-provider" name="provider"`) < form {
+		t.Fatalf("Change destination must keep the grouped form with the provider select, body=%q", configured)
 	}
 	for name, v := range map[string]BackupsPageView{
 		"key missing":  {CanManage: true, Settings: BackupSettingsKeyMissing},
 		"legacy admin": {CanManage: false, Settings: BackupSettingsReady},
 	} {
 		body := renderBackupsPageForTest(t, v)
-		if strings.Contains(body, "data-backup-wizard") || strings.Contains(body, backupWizardScript) || strings.Contains(body, `type="radio"`) {
+		if strings.Contains(body, "data-backup-wizard") || strings.Contains(body, backupWizardScript) || strings.Contains(body, `name="provider"`) {
 			t.Fatalf("%s must not render the wizard, body=%q", name, body)
 		}
 		if !strings.Contains(body, "No destination is configured.") {
@@ -164,9 +166,10 @@ func TestAdminBackupsPageWizardRerendersARefusedSave(t *testing.T) {
 			v := readyBackupsView(cloudstore.BackupDestination{})
 			v.DestinationForm = BackupDestinationForm{Submitted: true, Provider: "aws", Endpoint: "https://s3.us-east-1.amazonaws.com", Region: "us-east-1", Bucket: "submitted-bucket", Prefix: "submitted/", Field: field, Error: "a fixed reason"}
 			body := renderBackupsPageForTest(t, v)
+			assertSingleProviderPicker(t, body, "aws")
 			for _, marker := range []string{
 				`data-wizard-start="` + step + `"`, "Destination not saved.", "Your keys were not stored",
-				`value="aws" id="backup-provider-aws" checked`, `<span class="backup-path-bucket">submitted-bucket</span>`,
+				`<option value="aws" selected`, `<span class="backup-path-bucket">submitted-bucket</span>`,
 			} {
 				if !strings.Contains(body, marker) {
 					t.Fatalf("expected marker %q, body=%q", marker, body)
@@ -253,7 +256,7 @@ func TestBackupWizardScriptIsSelfContained(t *testing.T) {
 		t.Fatalf("the wizard script must be embedded: %v", err)
 	}
 	script := string(raw)
-	for _, marker := range []string{"data-backup-wizard", "aria-current", "prefers-reduced-motion", ".focus(", "backup-wizard-check", "noValidate", "reportValidity"} {
+	for _, marker := range []string{"data-backup-wizard", "aria-current", "prefers-reduced-motion", ".focus(", "backup-wizard-check", "noValidate", "reportValidity", "data-provider-hint", "selectedIndex"} {
 		if !strings.Contains(script, marker) {
 			t.Fatalf("the wizard script misses %q", marker)
 		}

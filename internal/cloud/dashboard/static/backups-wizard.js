@@ -4,7 +4,8 @@
 // single "Save destination" submit, so the page works without this script.
 // The script only enhances it: one step at a time with Back / Next, the
 // required fields of a step checked before moving on, aria-current on the
-// active step, focus on the step heading, a running summary, and "Test
+// active step, focus on the step heading, a running summary, the provider
+// hint and placeholders following the provider select, and "Test
 // connection", which asks the check route (through htmx) about the submitted
 // fields without saving them. It never stores, logs or displays a credential;
 // the summary only says whether both keys are filled in.
@@ -57,8 +58,10 @@
 			return el ? el.value.trim() : "";
 		}
 
-		function checkedProvider() {
-			return form.querySelector('input[name="provider"]:checked');
+		// pickedProvider is the selected option of the provider select.
+		function pickedProvider() {
+			var select = form.querySelector('select[name="provider"]');
+			return select && select.selectedIndex >= 0 ? select.options[select.selectedIndex] : null;
 		}
 
 		function firstInvalid(n) {
@@ -88,9 +91,12 @@
 		}
 
 		function refresh() {
-			var provider = checkedProvider();
-			var providerName = provider ? provider.getAttribute("data-provider-name") : "";
+			var provider = pickedProvider();
+			var providerName = provider ? provider.textContent.trim() : "";
 			if (provider) {
+				each(form.querySelectorAll("[data-provider-hint]"), function (hint) {
+					hint.hidden = hint.getAttribute("data-provider-hint") !== provider.value;
+				});
 				var endpoint = field("endpoint");
 				var region = field("region");
 				if (endpoint) {

@@ -78,7 +78,7 @@ func TestDashboardSaveBackupDestinationRerendersSubmittedValuesAndMarksTheField(
 			for _, marker := range []string{
 				"alert alert-danger", "Destination not saved.", "Your keys were not stored",
 				`<details class="backup-change" open>`,
-				`value="aws" id="backup-provider-aws" checked`,
+				`<option value="aws" selected`,
 				// The stored destination still shows in the summary.
 				`<p class="backup-summary-path">engram-backups/prod/</p>`,
 			} {
@@ -101,8 +101,8 @@ func TestDashboardSaveBackupDestinationRerenderWithoutDestinationKeepsTheFormOpe
 	form.Del("provider")
 	rec := doBackupRequest(f.srv, backupRequest{method: http.MethodPost, path: backupDestinationPath, form: form.Encode(), cookie: f.cookie})
 	body := rec.Body.String()
-	if rec.Code != http.StatusBadRequest || strings.Contains(body, `<details class="backup-`) || !strings.Contains(body, `value="do" id="backup-provider-do" checked`) {
-		t.Fatalf("expected the open form with the tile derived from the submitted endpoint, got %d body=%q", rec.Code, body)
+	if rec.Code != http.StatusBadRequest || strings.Contains(body, `<details class="backup-`) || !strings.Contains(body, `<option value="do" selected`) || !strings.Contains(body, `<div class="backup-provider-hint" data-provider-hint="do">`) {
+		t.Fatalf("expected the open form with the provider derived from the submitted endpoint, got %d body=%q", rec.Code, body)
 	}
 	if !strings.Contains(backupFormInputTag(t, body, "bucket"), `aria-invalid="true"`) || !strings.Contains(body, `<span class="backup-path-bucket">submitted-bucket</span>`) {
 		t.Fatalf("expected the bucket marked and the path preview from the submitted values, body=%q", body)
@@ -145,11 +145,11 @@ func TestDashboardSaveBackupDestinationIgnoresTheProviderHint(t *testing.T) {
 	if len(f.settings.putDestination) != 1 || f.settings.putDestination[0] != want {
 		t.Fatalf("the provider hint must not change the stored destination, got %+v", f.settings.putDestination)
 	}
-	// The re-rendered page derives the tile from the stored endpoint (R2),
-	// not from the submitted hint.
+	// The re-rendered page derives the provider from the stored endpoint
+	// (R2), not from the submitted hint.
 	page := performDashboardRequest(f.srv, http.MethodGet, dashboardRedirect(rec), f.cookie).Body.String()
-	if !strings.Contains(page, `value="r2" id="backup-provider-r2" checked`) || strings.Contains(page, `value="aws" id="backup-provider-aws" checked`) {
-		t.Fatalf("the selected tile must come from the stored endpoint, body=%q", page)
+	if !strings.Contains(page, `<option value="r2" selected`) || strings.Contains(page, `<option value="aws" selected`) || !strings.Contains(page, `<div class="backup-provider-hint" data-provider-hint="r2">`) {
+		t.Fatalf("the selected provider must come from the stored endpoint, body=%q", page)
 	}
 }
 

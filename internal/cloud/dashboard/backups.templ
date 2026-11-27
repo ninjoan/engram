@@ -185,7 +185,7 @@ templ backupDestinationBlock(v BackupsPageView) {
 			if v.Destination.Configured {
 				<details class="backup-change" open?={ v.destinationFormOpen() }>
 					<summary>Change destination</summary>
-					<p class="hint">The same provider tiles and grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
+					<p class="hint">The same grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
 					@backupDestinationForm(v)
 				</details>
 			} else {
@@ -204,7 +204,6 @@ templ backupDestinationBlock(v BackupsPageView) {
 // step, so it works without JavaScript.
 templ backupDestinationSummary(v BackupsPageView) {
 	<div class="backup-summary">
-		@backupProviderMark(v.configuredBackupProvider())
 		<div class="backup-summary-body">
 			<h4 class="backup-summary-title">{ v.configuredBackupProvider().Summary } <span class={ "backup-pill " + v.destinationStatus().Class }>{ v.destinationStatus().Label }</span></h4>
 			<p class="backup-summary-path">{ v.Destination.Bucket }/{ backupPathPrefix(v.Destination.Prefix) }</p>
@@ -304,9 +303,10 @@ templ backupWhen(t time.Time, now time.Time) {
 	<time datetime={ backupTimeAttr(t) }>{ backupRelativeTime(t, now) }</time> <span class="backup-when-utc">{ backupUTCLabel(t) }</span>
 }
 
-// backupDestinationForm is a plain POST form: the provider tiles are radios
-// that switch the guidance with CSS only and are never stored; the server
-// reads endpoint, region, bucket, prefix and both credentials.
+// backupDestinationForm is a plain POST form: the provider select only
+// switches the hint line (CSS where :has() is supported) and is never
+// stored; the server reads endpoint, region, bucket, prefix and both
+// credentials.
 templ backupDestinationForm(v BackupsPageView) {
 	<form method="post" action="/dashboard/admin/backups/destination" class="backup-provider-form" autocomplete="off">
 		if v.destinationSaveRefused() {
@@ -322,36 +322,22 @@ templ backupDestinationForm(v BackupsPageView) {
 				</p>
 			</div>
 		}
-		<fieldset class="backup-providers">
-			<legend><span class="backup-step" aria-hidden="true">1</span>Storage provider <span class="muted">shows the right endpoint format; not stored</span></legend>
-			<div class="backup-tiles">
-				for _, p := range backupProviders {
-					<label class="backup-tile">
-						<input type="radio" name="provider" value={ p.ID } id={ "backup-provider-" + p.ID } checked?={ v.selectedBackupProvider() == p.ID }/>
-						@backupProviderMark(p)
-						<span class="backup-tile-name">{ p.Name }</span>
-						<span class="backup-tile-pattern">{ p.Pattern }</span>
-						<svg class="backup-tile-check" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
-					</label>
-				}
-			</div>
-			@backupProviderGuide()
-		</fieldset>
 		<div class="backup-form-body">
 			<div class="backup-groups">
 				<fieldset class="backup-group">
-					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">2</span>Connection</legend>
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">1</span>Connection</legend>
 					<p class="hint backup-group-hint">How Engram reaches the storage service.</p>
 					<div class="backup-group-fields">
+						@backupProviderPicker(v)
 						<div class="backup-field">
 							<label for="backup-endpoint">Endpoint</label>
-							<input type="text" id="backup-endpoint" name="endpoint" value={ v.destinationFormValue("endpoint") } placeholder={ v.placeholderBackupProvider().EndpointPlaceholder } class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("endpoint", "backup-endpoint", true)... }/>
+							<input type="text" id="backup-endpoint" name="endpoint" value={ v.destinationFormValue("endpoint") } placeholder={ v.pickedBackupProvider().EndpointPlaceholder } class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("endpoint", "backup-endpoint", true)... }/>
 							@backupFieldError(v.destinationFieldError("endpoint"), "backup-endpoint")
 							<span class="hint" id="backup-endpoint-hint">Origin only, starting with <code>https://</code>; plain <code>http://</code> only for localhost and loopback addresses.</span>
 						</div>
 						<div class="backup-field">
 							<label for="backup-region">Region</label>
-							<input type="text" id="backup-region" name="region" value={ v.destinationFormValue("region") } placeholder={ v.placeholderBackupProvider().RegionPlaceholder } list="backup-region-suggestions" class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("region", "backup-region", true)... }/>
+							<input type="text" id="backup-region" name="region" value={ v.destinationFormValue("region") } placeholder={ v.pickedBackupProvider().RegionPlaceholder } list="backup-region-suggestions" class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("region", "backup-region", true)... }/>
 							<datalist id="backup-region-suggestions">
 								for _, region := range backupRegionSuggestions {
 									<option value={ region }></option>
@@ -363,7 +349,7 @@ templ backupDestinationForm(v BackupsPageView) {
 					</div>
 				</fieldset>
 				<fieldset class="backup-group">
-					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">3</span>Location</legend>
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">2</span>Location</legend>
 					<p class="hint backup-group-hint">Where the archives land.</p>
 					<div class="backup-group-fields even">
 						<div class="backup-field">
@@ -381,7 +367,7 @@ templ backupDestinationForm(v BackupsPageView) {
 					</div>
 				</fieldset>
 				<fieldset class="backup-group">
-					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">4</span>Credentials</legend>
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">3</span>Credentials</legend>
 					<p class="hint backup-group-hint">Paste both, every time you save.</p>
 					<div class="backup-group-fields even">
 						<div class="backup-field">
@@ -457,18 +443,7 @@ templ backupDestinationWizard(v BackupsPageView) {
 				<fieldset class="backup-step-panel" id="backup-wizard-step-1" data-wizard-step="1">
 					<legend><h5 class="backup-step-title" id="backup-wizard-step-1-title" tabindex="-1">Step 1 of 4 · Provider</h5></legend>
 					<p class="hint">Where should the archives go? The choice fills in the endpoint and region hints; it is not stored.</p>
-					<div class="backup-plist">
-						for _, p := range backupProviders {
-							<label class="backup-prow">
-								<input type="radio" name="provider" value={ p.ID } id={ "backup-provider-" + p.ID } checked?={ v.selectedBackupProvider() == p.ID } data-provider-name={ p.Name } data-endpoint-placeholder={ p.EndpointPlaceholder } data-region-placeholder={ p.RegionPlaceholder }/>
-								@backupProviderMark(p)
-								<span class="backup-prow-name">{ p.Name }</span>
-								<span class="backup-prow-pattern">{ p.Pattern }</span>
-								<span class="backup-prow-region">{ "region " + p.RegionPlaceholder }</span>
-							</label>
-						}
-					</div>
-					@backupProviderGuide()
+					@backupProviderPicker(v)
 					<div class="backup-step-nav">
 						<span class="muted">You can also skip this and fill in the fields directly.</span>
 						<button type="button" data-wizard-next hidden>Continue to connection →</button>
@@ -480,13 +455,13 @@ templ backupDestinationWizard(v BackupsPageView) {
 					<div class="backup-wizard-fields is-wide">
 						<div class="backup-field">
 							<label for="backup-endpoint">Endpoint</label>
-							<input type="text" id="backup-endpoint" name="endpoint" value={ v.destinationFormValue("endpoint") } placeholder={ v.placeholderBackupProvider().EndpointPlaceholder } class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("endpoint", "backup-endpoint", true)... }/>
+							<input type="text" id="backup-endpoint" name="endpoint" value={ v.destinationFormValue("endpoint") } placeholder={ v.pickedBackupProvider().EndpointPlaceholder } class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("endpoint", "backup-endpoint", true)... }/>
 							@backupFieldError(v.destinationFieldError("endpoint"), "backup-endpoint")
 							<span class="hint" id="backup-endpoint-hint">Origin only, starting with <code>https://</code>; plain <code>http://</code> only for localhost and loopback addresses.</span>
 						</div>
 						<div class="backup-field">
 							<label for="backup-region">Region</label>
-							<input type="text" id="backup-region" name="region" value={ v.destinationFormValue("region") } placeholder={ v.placeholderBackupProvider().RegionPlaceholder } list="backup-region-suggestions" class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("region", "backup-region", true)... }/>
+							<input type="text" id="backup-region" name="region" value={ v.destinationFormValue("region") } placeholder={ v.pickedBackupProvider().RegionPlaceholder } list="backup-region-suggestions" class="mono-input" spellcheck="false" required { v.destinationFieldAttrs("region", "backup-region", true)... }/>
 							<datalist id="backup-region-suggestions">
 								for _, region := range backupRegionSuggestions {
 									<option value={ region }></option>
@@ -568,7 +543,7 @@ templ backupDestinationWizard(v BackupsPageView) {
 			<aside class="backup-rail" aria-label="Setup summary">
 				<h5>Your destination</h5>
 				<dl>
-					@backupWizardSummaryRow("Provider", "provider", "1", v.wizardProviderName(), "not chosen")
+					@backupWizardSummaryRow("Provider", "provider", "1", v.pickedBackupProvider().Name, "not chosen")
 					@backupWizardSummaryRow("Endpoint", "endpoint", "2", v.wizardSummaryValue("endpoint"), "not set yet")
 					@backupWizardSummaryRow("Region", "region", "2", v.wizardSummaryValue("region"), "not set yet")
 					@backupWizardSummaryRow("Bucket", "bucket", "2", v.wizardSummaryValue("bucket"), "not set yet")
@@ -628,24 +603,52 @@ templ backupFieldError(reason string, id string) {
 	}
 }
 
-// backupProviderMark is a text monogram, not a provider logo.
-templ backupProviderMark(p backupProvider) {
-	<svg class={ "backup-mark backup-mark-" + p.ID } width="40" height="40" viewBox="0 0 40 40" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="39" height="39" rx="10"></rect><text x="20" y="25" text-anchor="middle">{ p.Mark }</text></svg>
+// backupProviderPicker is the provider select and one hint line for the
+// selected provider: its endpoint pattern, region and a short note. The
+// server marks the other hints hidden; where :has() is supported CSS shows
+// the hint of the option picked since, and backups-wizard.js does the same
+// in the guided setup. The choice only drives these hints and the
+// placeholders; it is never stored.
+templ backupProviderPicker(v BackupsPageView) {
+	<div class="backup-field backup-provider-pick">
+		<label for="backup-provider">Provider</label>
+		<select id="backup-provider" name="provider" aria-describedby="backup-provider-hint">
+			for _, p := range backupProviders {
+				<option value={ p.ID } selected?={ v.pickedBackupProvider().ID == p.ID } data-endpoint-placeholder={ p.EndpointPlaceholder } data-region-placeholder={ p.RegionPlaceholder }>{ p.Name }</option>
+			}
+		</select>
+		<div class="backup-provider-hints" id="backup-provider-hint" aria-live="polite">
+			for _, p := range backupProviders {
+				<div class="backup-provider-hint" data-provider-hint={ p.ID } hidden?={ v.pickedBackupProvider().ID != p.ID }>
+					<p class="backup-provider-line">Endpoint: <code>{ p.Pattern }</code> · Region: <code>{ p.RegionPlaceholder }</code></p>
+					<p>
+						@backupProviderNote(p.ID)
+					</p>
+				</div>
+			}
+		</div>
+	</div>
 }
 
-// backupProviderGuide holds the help for every tile; CSS shows the one of
-// the checked tile, so it works without JavaScript.
-templ backupProviderGuide() {
-	<div class="backup-provider-guide" aria-live="polite">
-		<div data-provider-guide="none"><p>Choose a provider to see where to find its endpoint, region and keys. You can also skip this and fill the fields directly.</p></div>
-		<div data-provider-guide="r2"><p><strong>Cloudflare R2.</strong> Your Account ID is on <em>R2 › Overview</em>. Create an R2 API token with <em>Object Read &amp; Write</em> scoped to this bucket. Region is always <code>auto</code>. Set expiration under the bucket's <em>Settings › Object lifecycle rules</em>.</p></div>
-		<div data-provider-guide="aws"><p><strong>Amazon S3.</strong> Use the bucket's own region, for example <code>https://s3.us-east-1.amazonaws.com</code> with region <code>us-east-1</code>. The access key needs <code>s3:PutObject</code> and <code>s3:ListBucket</code> on this bucket.</p></div>
-		<div data-provider-guide="b2"><p><strong>Backblaze B2.</strong> Copy the region from the bucket's S3 endpoint, for example <code>https://s3.us-west-004.backblazeb2.com</code> → region <code>us-west-004</code>. Create an application key restricted to this bucket.</p></div>
-		<div data-provider-guide="wasabi"><p><strong>Wasabi.</strong> Use the bucket's region endpoint, for example <code>https://s3.eu-central-1.wasabisys.com</code> with region <code>eu-central-1</code>.</p></div>
-		<div data-provider-guide="do"><p><strong>DigitalOcean Spaces.</strong> The endpoint is the datacenter, for example <code>https://nyc3.digitaloceanspaces.com</code> with region <code>nyc3</code>. Create a Spaces access key.</p></div>
-		<div data-provider-guide="minio"><p><strong>MinIO or another server you run.</strong> Use its origin, for example <code>https://minio.internal.example.com:9000</code>. Plain <code>http://</code> is accepted only for <code>localhost</code> and loopback addresses such as <code>127.0.0.1</code>. MinIO's default region is <code>us-east-1</code>.</p></div>
-		<div data-provider-guide="other"><p><strong>Other S3-compatible storage.</strong> Any service that accepts S3 Signature V4 requests over https. Use the region your provider documents, or <code>auto</code> when it has none.</p></div>
-	</div>
+// backupProviderNote is the short help of one provider: where to find its
+// endpoint, region and keys.
+templ backupProviderNote(id string) {
+	switch id {
+		case "r2":
+			Your Account ID is on <em>R2 › Overview</em>. Create an R2 API token with <em>Object Read &amp; Write</em> scoped to this bucket. Set expiration under the bucket's <em>Settings › Object lifecycle rules</em>.
+		case "aws":
+			Use the bucket's own region, for example <code>https://s3.us-east-1.amazonaws.com</code> with region <code>us-east-1</code>. The access key needs <code>s3:PutObject</code> and <code>s3:ListBucket</code> on this bucket.
+		case "b2":
+			Copy the region from the bucket's S3 endpoint, for example <code>https://s3.us-west-004.backblazeb2.com</code> → region <code>us-west-004</code>. Create an application key restricted to this bucket.
+		case "wasabi":
+			Use the bucket's region endpoint, for example <code>https://s3.eu-central-1.wasabisys.com</code> with region <code>eu-central-1</code>.
+		case "do":
+			The endpoint is the datacenter, for example <code>https://nyc3.digitaloceanspaces.com</code> with region <code>nyc3</code>. Create a Spaces access key.
+		case "minio":
+			Use its origin, for example <code>https://minio.internal.example.com:9000</code>. Plain <code>http://</code> is accepted only for <code>localhost</code> and loopback addresses such as <code>127.0.0.1</code>. MinIO's default region is <code>us-east-1</code>.
+		case "other":
+			Any service that accepts S3 Signature V4 requests over https. Use the region your provider documents, or <code>auto</code> when it has none.
+	}
 }
 
 templ backupScheduleBlock(v BackupsPageView) {

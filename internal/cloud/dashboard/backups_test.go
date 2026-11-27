@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"context"
+	"html"
 	"regexp"
 	"strings"
 	"testing"
@@ -12,9 +13,14 @@ import (
 )
 
 var (
-	backupProviderRadio = regexp.MustCompile(`<input type="radio" name="provider" value="([a-z0-9]+)" id="backup-provider-[a-z0-9]+"( checked)?`)
-	backupFormFieldName = regexp.MustCompile(`<(?:input|button)[^>]*\bname="([a-z_]+)"`)
+	backupProviderSelect = regexp.MustCompile(`(?s)<label for="backup-provider">Provider</label>\s*<select id="backup-provider" name="provider"[^>]*>(.*?)</select>`)
+	backupProviderOption = regexp.MustCompile(`<option value="([a-z0-9]+)"( selected)?[^>]*>([^<]*)</option>`)
+	backupProviderHint   = regexp.MustCompile(`<div class="backup-provider-hint" data-provider-hint="([a-z0-9]+)"( hidden)?>`)
+	backupFormFieldName  = regexp.MustCompile(`<(?:input|button|select)[^>]*\bname="([a-z_]+)"`)
 )
+
+// backupProviderNames is the provider select's option list, in order.
+const backupProviderNames = "Cloudflare R2,Amazon S3,Backblaze B2,Wasabi,DigitalOcean Spaces,MinIO / self-hosted,Other S3-compatible"
 
 func renderBackupsPageForTest(t *testing.T, v BackupsPageView) string {
 	t.Helper()
@@ -52,42 +58,84 @@ func backupInputTag(t *testing.T, body, name string) string {
 	return tag
 }
 
-func backupProviderSelection(body string) (values []string, checked []string) {
-	for _, m := range backupProviderRadio.FindAllStringSubmatch(body, -1) {
+// backupProviderSelection parses the labelled provider select: its option
+// values and names in order and the values marked selected. It fails when
+// the page renders more than one provider select.
+func backupProviderSelection(t *testing.T, body string) (values, names, selected []string) {
+	t.Helper()
+	selects := backupProviderSelect.FindAllStringSubmatch(body, -1)
+	if len(selects) != 1 {
+		t.Fatalf("expected one provider select labelled Provider, got %d, body=%q", len(selects), body)
+	}
+	for _, m := range backupProviderOption.FindAllStringSubmatch(selects[0][1], -1) {
 		values = append(values, m[1])
+		names = append(names, m[3])
 		if m[2] != "" {
-			checked = append(checked, m[1])
+			selected = append(selected, m[1])
 		}
 	}
-	return values, checked
+	return values, names, selected
+}
+
+// backupVisibleProviderHints lists the provider hints rendered without the
+// hidden attribute, and how many hints there are in total.
+func backupVisibleProviderHints(body string) (visible []string, total int) {
+	for _, m := range backupProviderHint.FindAllStringSubmatch(body, -1) {
+		total++
+		if m[2] == "" {
+			visible = append(visible, m[1])
+		}
+	}
+	return visible, total
+}
+
+// assertSingleProviderPicker checks the provider select (7 options in order,
+// exactly want selected), one visible hint for want with its endpoint and
+// region line, and no tile, radio or monogram markup.
+func assertSingleProviderPicker(t *testing.T, body, want string) {
+	t.Helper()
+	values, names, selected := backupProviderSelection(t, body)
+	if got := strings.Join(values, ","); got != "r2,aws,b2,wasabi,do,minio,other" {
+		t.Fatalf("provider options = %q", got)
+	}
+	if got := strings.Join(names, ","); got != html.EscapeString(backupProviderNames) {
+		t.Fatalf("provider names = %q", got)
+	}
+	if len(selected) != 1 || selected[0] != want {
+		t.Fatalf("selected providers = %v, want [%s]", selected, want)
+	}
+	visible, total := backupVisibleProviderHints(body)
+	if total != 7 || len(visible) != 1 || visible[0] != want {
+		t.Fatalf("visible provider hints = %v of %d, want only %s", visible, total, want)
+	}
+	p, _ := lookupBackupProvider(want)
+	line := "Endpoint: <code>" + html.EscapeString(p.Pattern) + "</code> · Region: <code>" + p.RegionPlaceholder + "</code>"
+	if !strings.Contains(body, line) {
+		t.Fatalf("expected the hint line %q, body=%q", line, body)
+	}
+	for _, forbidden := range []string{"backup-mark", "backup-tile", "backup-prow", "backup-plist", `type="radio"`, "data-provider-guide"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("the provider picker must not render %q", forbidden)
+		}
+	}
 }
 
 // The first-time (empty) state renders the guided setup instead
-// (backups_wizard_test.go); the provider tiles and grouped form stay behind
+// (backups_wizard_test.go); the provider select and grouped form stay behind
 // Change destination, pre-filled from the stored destination.
-func TestAdminBackupsPageChangeDestinationRendersProviderTilesAndGroupedForm(t *testing.T) {
+func TestAdminBackupsPageChangeDestinationRendersProviderSelectAndGroupedForm(t *testing.T) {
 	d := configuredR2Destination()
 	d.Endpoint, d.Bucket, d.Prefix = "https://s3.qa.local:9443", "", ""
 	body := renderBackupsPageForTest(t, readyBackupsView(d))
 
-	values, checked := backupProviderSelection(body)
-	if got, want := strings.Join(values, ","), "r2,aws,b2,wasabi,do,minio,other"; got != want {
-		t.Fatalf("provider tiles = %q, want %q", got, want)
-	}
-	if len(checked) != 1 || checked[0] != "other" {
-		t.Fatalf("the tile must come from the stored endpoint host, got %v", checked)
+	assertSingleProviderPicker(t, body, "other")
+	if form := strings.Index(body, `class="backup-provider-form"`); form < 0 || strings.Index(body, `id="backup-provider"`) < form {
+		t.Fatalf("the provider select must be inside the Change destination form, body=%q", body)
 	}
 	for _, marker := range []string{
 		`<form method="post" action="/dashboard/admin/backups/destination" class="backup-provider-form" autocomplete="off">`,
-		"Cloudflare R2", "&lt;account-id&gt;.r2.cloudflarestorage.com",
-		"Amazon S3", "s3.&lt;region&gt;.amazonaws.com",
-		"Backblaze B2", "s3.&lt;region&gt;.backblazeb2.com",
-		"Wasabi", "s3.&lt;region&gt;.wasabisys.com",
-		"DigitalOcean Spaces", "&lt;region&gt;.digitaloceanspaces.com",
-		"MinIO / self-hosted", "Other S3-compatible", "any SigV4 endpoint over https",
-		`<svg class="backup-mark backup-mark-r2"`,
-		"Storage provider", ">Connection</legend>", ">Location</legend>", ">Credentials</legend>",
-		`data-provider-guide="none"`, `data-provider-guide="r2"`, `data-provider-guide="other"`,
+		`<select id="backup-provider" name="provider" aria-describedby="backup-provider-hint"`,
+		">Connection</legend>", ">Location</legend>", ">Credentials</legend>",
 		"Backups will be saved as",
 		`<span class="backup-path-bucket">&lt;bucket&gt;</span>`,
 		"engram-cloud-backup-&lt;UTC timestamp&gt;-run&lt;id&gt;.tar.gz",
@@ -138,7 +186,7 @@ func TestAdminBackupsPageDestinationFormPostsOnlyTheStoredFields(t *testing.T) {
 	}
 }
 
-func TestAdminBackupsPageSelectsTileFromStoredEndpointHost(t *testing.T) {
+func TestAdminBackupsPageSelectsProviderFromStoredEndpointHost(t *testing.T) {
 	cases := []struct {
 		endpoint, want, name string
 	}{
@@ -158,20 +206,27 @@ func TestAdminBackupsPageSelectsTileFromStoredEndpointHost(t *testing.T) {
 			d := configuredR2Destination()
 			d.Endpoint = tc.endpoint
 			body := renderBackupsPageForTest(t, readyBackupsView(d))
-			if _, checked := backupProviderSelection(body); len(checked) != 1 || checked[0] != tc.want {
-				t.Fatalf("checked tiles = %v, want [%s]", checked, tc.want)
-			}
+			assertSingleProviderPicker(t, body, tc.want)
 			if !strings.Contains(body, `<h4 class="backup-summary-title">`+tc.name) {
 				t.Fatalf("summary must name provider %q, body=%q", tc.name, body)
 			}
-			if !strings.Contains(body, `<svg class="backup-mark backup-mark-`+tc.want+`"`) {
-				t.Fatalf("summary must show the %s mark", tc.want)
+			if tag := backupInputTag(t, body, "endpoint"); !strings.Contains(tag, `placeholder="`+html.EscapeString(mustBackupProvider(t, tc.want).EndpointPlaceholder)+`"`) {
+				t.Fatalf("the endpoint placeholder must follow the %s provider, got %q", tc.want, tag)
 			}
 		})
 	}
 }
 
-func TestAdminBackupsPageConfiguredCollapsesTilesBehindChangeDestination(t *testing.T) {
+func mustBackupProvider(t *testing.T, id string) backupProvider {
+	t.Helper()
+	p, ok := lookupBackupProvider(id)
+	if !ok {
+		t.Fatalf("unknown provider %q", id)
+	}
+	return p
+}
+
+func TestAdminBackupsPageConfiguredCollapsesProviderSelectBehindChangeDestination(t *testing.T) {
 	body := renderBackupsPageForTest(t, readyBackupsView(configuredR2Destination()))
 	for _, marker := range []string{
 		`<span class="backup-pill is-untested">Not tested</span>`,
@@ -191,8 +246,8 @@ func TestAdminBackupsPageConfiguredCollapsesTilesBehindChangeDestination(t *test
 		}
 	}
 	details := strings.Index(body, `<details class="backup-change">`)
-	if tiles := strings.Index(body, `name="provider"`); tiles < details {
-		t.Fatalf("tiles must be collapsed inside Change destination (details at %d, tiles at %d)", details, tiles)
+	if picker := strings.Index(body, `name="provider"`); picker < details {
+		t.Fatalf("the provider select must be collapsed inside Change destination (details at %d, select at %d)", details, picker)
 	}
 	if form := strings.Index(body, `action="/dashboard/admin/backups/destination"`); form < details {
 		t.Fatal("the destination form must be inside Change destination")
@@ -227,7 +282,7 @@ func TestAdminBackupsPageReadOnlyStatesRenderNoForms(t *testing.T) {
 			if !strings.Contains(body, `<h4 class="backup-summary-title">Cloudflare R2`) || !strings.Contains(body, "engram-backups/prod/") || !strings.Contains(body, "****7f3a") {
 				t.Fatalf("read-only summary missing, body=%q", body)
 			}
-			for _, forbidden := range []string{`action="/dashboard/admin/backups/destination`, `type="radio"`, `<details class="backup-`, "Change destination", `name="secret_access_key"`} {
+			for _, forbidden := range []string{`action="/dashboard/admin/backups/destination`, `name="provider"`, `type="radio"`, "backup-mark", `<details class="backup-`, "Change destination", `name="secret_access_key"`} {
 				if strings.Contains(body, forbidden) {
 					t.Fatalf("read-only state must not render %q", forbidden)
 				}
@@ -235,7 +290,7 @@ func TestAdminBackupsPageReadOnlyStatesRenderNoForms(t *testing.T) {
 		})
 	}
 	body := renderBackupsPageForTest(t, BackupsPageView{CanManage: true, Settings: BackupSettingsKeyMissing})
-	if !strings.Contains(body, "ENGRAM_CLOUD_BACKUP_KEY") || !strings.Contains(body, "No destination is configured.") || strings.Contains(body, `type="radio"`) {
-		t.Fatalf("key missing without destination explains and renders no tiles, body=%q", body)
+	if !strings.Contains(body, "ENGRAM_CLOUD_BACKUP_KEY") || !strings.Contains(body, "No destination is configured.") || strings.Contains(body, `name="provider"`) {
+		t.Fatalf("key missing without destination explains and renders no provider select, body=%q", body)
 	}
 }
