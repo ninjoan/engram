@@ -28,7 +28,9 @@ type driveFile struct {
 // EnsureFolder returns the ID of the folder called name that this app
 // created, creating it when absent. With the drive.file scope Drive only
 // lists folders the app created, so a folder made by hand is never reused.
-// When several match, the oldest wins (Drive allows duplicate names).
+// When several match, the oldest wins (Drive allows duplicate names). A
+// create whose outcome is unknown (network error or 5xx) is never resent
+// blindly: the folder is listed again and reused when it exists.
 func (c *Client) EnsureFolder(ctx context.Context, name string) (folderID string, err error) {
 	const op = "EnsureFolder"
 	if err := validateName(op, name); err != nil {
@@ -43,17 +45,35 @@ func (c *Client) EnsureFolder(ctx context.Context, name string) (folderID string
 	}
 	meta, _ := json.Marshal(map[string]string{"name": name, "mimeType": FolderMimeType})
 	q := url.Values{"supportsAllDrives": {"true"}, "fields": {"id"}}
-	resp, err := c.do(ctx, call{
-		op:     op,
-		method: http.MethodPost,
-		url:    c.ep.api + "/files?" + q.Encode(),
-		header: http.Header{"Content-Type": {"application/json; charset=UTF-8"}},
-		body:   meta,
-	}, true)
-	if err != nil {
-		return "", err
+	create := call{
+		op:               op,
+		method:           http.MethodPost,
+		url:              c.ep.api + "/files?" + q.Encode(),
+		header:           http.Header{"Content-Type": {"application/json; charset=UTF-8"}},
+		body:             meta,
+		noAmbiguousRetry: true,
 	}
-	return parseFileID(op, resp)
+	// A create whose outcome is unknown (no answer or a 5xx) may have made
+	// the folder: list again and reuse it before creating another one.
+	for attempt := 0; ; attempt++ {
+		resp, err := c.do(ctx, create, true)
+		if err == nil {
+			return parseFileID(op, resp)
+		}
+		if !ambiguous(err) || attempt >= c.maxRetries {
+			return "", err
+		}
+		if err := c.backoff(ctx, op, attempt, 0); err != nil {
+			return "", err
+		}
+		files, lerr := c.listFolders(ctx, op, name, 100)
+		if lerr != nil {
+			return "", lerr
+		}
+		if len(files) > 0 {
+			return files[0].ID, nil
+		}
+	}
 }
 
 // CheckAccess proves, without writing anything, that the refresh token still

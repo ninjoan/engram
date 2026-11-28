@@ -24,6 +24,9 @@ type call struct {
 	token           string   // bearer access token; empty for none
 	chunk           bool     // upload chunk: stall/response watchdog instead of the request timeout
 	secrets         []string // extra values to redact from server text
+	// noAmbiguousRetry returns network errors and 5xx answers to the caller
+	// instead of resending: the request may have taken effect (folder create).
+	noAmbiguousRetry bool
 }
 
 type response struct {
@@ -61,14 +64,19 @@ func (c *Client) roundTrip(callerCtx context.Context, cl call) (*response, error
 		return nil, fmt.Errorf("gdrive: %s: build request: %w", cl.op, err)
 	}
 	if len(cl.body) > 0 {
+		// The transport may still read the body after Do returns (an early
+		// response); the caller reuses the chunk buffer right after this
+		// returns, so every reader is cut off from it first.
 		body := cl.body
-		req.Body = io.NopCloser(&progressReader{r: bytes.NewReader(body), wd: wd})
+		guard := &bodyGuard{}
+		defer guard.detach()
+		req.Body = io.NopCloser(&progressReader{r: bytes.NewReader(body), wd: wd, guard: guard})
 		req.ContentLength = int64(len(body))
 		req.GetBody = func() (io.ReadCloser, error) {
 			if wd != nil {
 				wd.restart()
 			}
-			return io.NopCloser(&progressReader{r: bytes.NewReader(body), wd: wd}), nil
+			return io.NopCloser(&progressReader{r: bytes.NewReader(body), wd: wd, guard: guard}), nil
 		}
 	}
 	for k, v := range cl.header {
@@ -140,18 +148,43 @@ type timeoutError struct{ msg string }
 func (e *timeoutError) Error() string { return e.msg }
 func (e *timeoutError) Timeout() bool { return true }
 
+// errBodyDetached is returned to a transport that reads a request body
+// after its round trip ended.
+var errBodyDetached = errors.New("request body read after the round trip ended")
+
+// bodyGuard cuts every reader of one round trip's body off from the shared
+// chunk buffer once the round trip has returned.
+type bodyGuard struct {
+	mu       sync.Mutex
+	detached bool
+}
+
+func (g *bodyGuard) detach() {
+	g.mu.Lock()
+	g.detached = true
+	g.mu.Unlock()
+}
+
 // progressReader feeds a chunk to the transport and reports progress.
 type progressReader struct {
-	r  *bytes.Reader
-	wd *watchdog
+	r     *bytes.Reader
+	wd    *watchdog
+	guard *bodyGuard
 }
 
 func (p *progressReader) Read(b []byte) (int, error) {
 	if p.wd != nil {
 		p.wd.progress()
 	}
+	p.guard.mu.Lock()
+	if p.guard.detached {
+		p.guard.mu.Unlock()
+		return 0, errBodyDetached
+	}
 	n, err := p.r.Read(b)
-	if p.wd != nil && (err == io.EOF || p.r.Len() == 0) {
+	sent := err == io.EOF || p.r.Len() == 0
+	p.guard.mu.Unlock()
+	if p.wd != nil && sent {
 		p.wd.bodySent()
 	}
 	return n, err

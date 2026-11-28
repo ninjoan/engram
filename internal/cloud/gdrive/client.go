@@ -117,10 +117,21 @@ type Client struct {
 	jitter          func(time.Duration) time.Duration
 }
 
+// tokenCache holds the access token. mu guards the fields and is never held
+// across a request; flight is the refresh in progress, shared by every
+// caller that needs a token meanwhile.
 type tokenCache struct {
 	mu     sync.Mutex
 	access string
 	expiry time.Time
+	flight *tokenFlight
+}
+
+// tokenFlight is one token refresh. done closes once token and err are set.
+type tokenFlight struct {
+	done  chan struct{}
+	token string
+	err   error
 }
 
 // New validates cfg and returns a Client. It makes no network call. Errors
@@ -273,19 +284,60 @@ func (e endpoints) permits(u *url.URL) bool {
 		e.allowed[strings.ToLower(u.Scheme)+"://"+strings.ToLower(u.Host)]
 }
 
-// accessToken returns a cached access token or refreshes it.
+const opTokenRefresh = "TokenRefresh"
+
+// accessToken returns a cached access token or waits for a refresh. Callers
+// share one refresh at a time; each waiter stops waiting as soon as its own
+// ctx ends. The refresh runs on a context detached from the caller that
+// started it (so its cancellation never fails the other waiters), bounded
+// by the request timeout.
 func (c *Client) accessToken(ctx context.Context) (string, error) {
 	c.tok.mu.Lock()
-	defer c.tok.mu.Unlock()
 	if c.tok.access != "" && c.now().Before(c.tok.expiry) {
-		return c.tok.access, nil
+		tok := c.tok.access
+		c.tok.mu.Unlock()
+		return tok, nil
 	}
+	if err := ctx.Err(); err != nil {
+		c.tok.mu.Unlock()
+		return "", &Error{Op: opTokenRefresh, Kind: err}
+	}
+	f := c.tok.flight
+	if f == nil {
+		f = &tokenFlight{done: make(chan struct{})}
+		c.tok.flight = f
+		go c.runRefresh(context.WithoutCancel(ctx), f)
+	}
+	c.tok.mu.Unlock()
+	select {
+	case <-f.done:
+		return f.token, f.err
+	case <-ctx.Done():
+		return "", &Error{Op: opTokenRefresh, Kind: ctx.Err()}
+	}
+}
+
+// runRefresh performs flight f and caches its token.
+func (c *Client) runRefresh(base context.Context, f *tokenFlight) {
+	ctx, cancel := context.WithTimeout(base, c.requestTimeout)
+	defer cancel()
 	tok, ttl, err := c.refresh(ctx)
-	if err != nil {
-		return "", err
+	if err != nil && ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded) {
+		// The refresh's own bound, not a caller's deadline.
+		err = &Error{Op: opTokenRefresh, Kind: ErrNetwork, Err: &timeoutError{msg: fmt.Sprintf("token refresh timed out after %s", c.requestTimeout)}}
 	}
-	c.tok.access, c.tok.expiry = tok, c.now().Add(ttl-tokenRefreshSkew)
-	return tok, nil
+	c.tok.mu.Lock()
+	if err == nil {
+		skew := tokenRefreshSkew
+		if ttl < 2*skew {
+			skew = ttl / 2
+		}
+		c.tok.access, c.tok.expiry = tok, c.now().Add(ttl-skew)
+	}
+	f.token, f.err = tok, err
+	c.tok.flight = nil
+	c.tok.mu.Unlock()
+	close(f.done)
 }
 
 // invalidate drops tok from the cache (all tokens when tok is empty).
@@ -324,7 +376,7 @@ func (c *Client) do(ctx context.Context, cl call, auth bool) (*response, error) 
 			retryAfter = parseRetryAfter(resp.header)
 			err = c.responseError(cl, resp)
 		}
-		if !retryable(err) || retries >= c.maxRetries {
+		if !retryable(err) || retries >= c.maxRetries || (cl.noAmbiguousRetry && ambiguous(err)) {
 			return nil, err
 		}
 		if err := c.backoff(ctx, cl.op, retries, retryAfter); err != nil {
@@ -352,6 +404,16 @@ func (c *Client) backoff(ctx context.Context, op string, attempt int, retryAfter
 		return &Error{Op: op, Kind: err}
 	}
 	return nil
+}
+
+// ambiguous reports a failure after which the request may or may not have
+// taken effect (no answer, or a server error).
+func ambiguous(err error) bool {
+	var e *Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Kind == ErrNetwork || (e.Kind == ErrUnexpected && e.StatusCode >= 500)
 }
 
 func retryable(err error) bool {

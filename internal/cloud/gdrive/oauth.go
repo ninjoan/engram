@@ -115,9 +115,15 @@ func formCall(op, tokenURL string, form url.Values, secrets ...string) call {
 	}
 }
 
-// refresh trades the refresh token for an access token and its lifetime.
+// defaultTokenLifetime is assumed when a token response carries no usable
+// expires_in, so the access token is still cached (Google issues 1h tokens).
+const defaultTokenLifetime = time.Hour
+
+// refresh trades the refresh token for an access token and its lifetime. A
+// response that reports a granted scope other than exactly drive.file is
+// refused with ErrScope, and the access token is never used.
 func (c *Client) refresh(ctx context.Context) (string, time.Duration, error) {
-	const op = "TokenRefresh"
+	const op = opTokenRefresh
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {c.refreshToken},
@@ -129,14 +135,19 @@ func (c *Client) refresh(ctx context.Context) (string, time.Duration, error) {
 		return "", 0, err
 	}
 	var body struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int64  `json:"expires_in"`
+		AccessToken string  `json:"access_token"`
+		ExpiresIn   int64   `json:"expires_in"`
+		Scope       *string `json:"scope"`
 	}
 	if err := json.Unmarshal(resp.body, &body); err != nil || body.AccessToken == "" {
 		return "", 0, &Error{Op: op, Kind: ErrUnexpected, StatusCode: resp.status, Message: "token response has no access token"}
 	}
-	if body.ExpiresIn < 0 || body.ExpiresIn > 24*3600 {
-		body.ExpiresIn = 0
+	if body.Scope != nil && !driveFileOnly(*body.Scope) {
+		return "", 0, &Error{Op: op, Kind: ErrScope, Message: "granted: " + c.sanitize(*body.Scope, maxErrorMessage, []string{body.AccessToken})}
 	}
-	return body.AccessToken, time.Duration(body.ExpiresIn) * time.Second, nil
+	ttl := time.Duration(body.ExpiresIn) * time.Second
+	if body.ExpiresIn <= 0 || body.ExpiresIn > 24*3600 {
+		ttl = defaultTokenLifetime
+	}
+	return body.AccessToken, ttl, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -167,8 +168,8 @@ func (c *Client) sanitize(s string) string {
 		return r
 	}, s)
 	for _, secret := range c.secrets() {
-		if secret != "" {
-			s = strings.ReplaceAll(s, secret, redacted)
+		for _, form := range secretForms(secret) {
+			s = strings.ReplaceAll(s, form, redacted)
 		}
 	}
 	s = strings.Join(strings.Fields(s), " ")
@@ -205,4 +206,19 @@ func incorrectOffset(err error) (int64, bool) {
 		return 0, false
 	}
 	return e.correctOffset, true
+}
+
+// secretForms returns secret as sent and its URL-encoded variants: the
+// token endpoint may echo a form value encoded.
+func secretForms(secret string) []string {
+	if secret == "" {
+		return nil
+	}
+	forms := []string{secret}
+	for _, v := range []string{url.QueryEscape(secret), url.PathEscape(secret)} {
+		if v != forms[len(forms)-1] && v != secret {
+			forms = append(forms, v)
+		}
+	}
+	return forms
 }

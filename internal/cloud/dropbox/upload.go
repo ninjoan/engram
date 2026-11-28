@@ -153,6 +153,7 @@ func (c *Client) uploadSession(ctx context.Context, path string, src *bodySource
 		}
 		if err == nil {
 			offset += n
+			transients = 0 // the transient budget is per chunk
 			continue
 		}
 		if ctx.Err() != nil {
@@ -243,9 +244,11 @@ func (c *Client) sessionAppend(ctx context.Context, sessionID string, ch *chunk)
 }
 
 // commit sends a request that creates the file (upload or finish). When its
-// outcome is unknown (no response, timeout or server error) it asks
-// get_metadata whether the file is already there with the expected size and
-// content hash before retrying, so the file is never committed twice.
+// outcome is unknown (no response, timeout or server error) it backs off and
+// asks get_metadata whether the file is already there with the expected size
+// and content hash before retrying, so the file is never committed twice. A
+// probe that fails transiently is retried with backoff, at most
+// maxCommitAttempts times; the commit is never resent without an answer.
 func (c *Client) commit(ctx context.Context, path string, src *bodySource, size int64, r request) (string, error) {
 	ambiguous := false
 	for attempt := 1; ; attempt++ {
@@ -271,7 +274,7 @@ func (c *Client) commit(ctx context.Context, path string, src *bodySource, size 
 			return "", err
 		}
 		ambiguous = true
-		p, found, ferr := c.findUploaded(ctx, r.op, path, src, size)
+		p, found, ferr := c.probeCommit(ctx, r.op, path, src, size)
 		switch {
 		case ferr != nil && (errors.Is(ferr, ErrConflict) || ctx.Err() != nil):
 			return "", ferr
@@ -282,8 +285,20 @@ func (c *Client) commit(ctx context.Context, path string, src *bodySource, size 
 		case attempt >= maxCommitAttempts:
 			return "", err
 		}
-		if serr := c.sleep(ctx, backoff(attempt-1)); serr != nil {
-			return "", &Error{Op: r.op, Kind: serr}
+	}
+}
+
+// probeCommit backs off, then runs findUploaded, retrying a transient
+// failure of the probe itself with growing backoff up to maxCommitAttempts
+// probes.
+func (c *Client) probeCommit(ctx context.Context, op, path string, src *bodySource, size int64) (string, bool, error) {
+	for probe := 0; ; probe++ {
+		if serr := c.sleep(ctx, backoff(probe)); serr != nil {
+			return "", false, &Error{Op: op, Kind: serr}
+		}
+		p, found, err := c.findUploaded(ctx, op, path, src, size)
+		if err == nil || !isTransient(err) || probe+1 >= maxCommitAttempts || ctx.Err() != nil {
+			return p, found, err
 		}
 	}
 }

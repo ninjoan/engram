@@ -10,6 +10,7 @@ package dropbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -43,11 +44,14 @@ const (
 	// refreshMargin renews an access token this long before it expires
 	// (half its lifetime for tokens that live less than twice the margin).
 	refreshMargin = 5 * time.Minute
+	// defaultTokenLifetime is assumed when a token response has no usable
+	// expires_in, so the access token is still cached (renewed after 55m).
+	defaultTokenLifetime = time.Hour
 
 	maxOffsetResyncs    = 8               // incorrect_offset corrections per upload
 	maxRateLimitRetries = 4               // 429 retries per request
 	maxRetryWait        = 5 * time.Minute // longest Retry-After honored
-	maxTransientRetries = 5               // network/5xx chunk retries per upload
+	maxTransientRetries = 5               // network/5xx retries per session chunk
 	maxCommitAttempts   = 3               // attempts of a commit (upload or finish)
 	maxBackoff          = 30 * time.Second
 	maxRememberedTokens = 8 // recent access tokens redacted from server text
@@ -91,14 +95,22 @@ var productionEndpoints = endpoints{
 	content: "https://" + contentHost,
 }
 
-// tokenState caches the short-lived access token. refresh serializes token
-// requests; mu guards the fields and is never held across a request.
+// tokenState caches the short-lived access token. mu guards the fields and
+// is never held across a request; flight is the refresh in progress, shared
+// by every caller that needs a token meanwhile.
 type tokenState struct {
-	refresh sync.Mutex
-	mu      sync.Mutex
-	access  string
-	expiry  time.Time
-	seen    []string // every access token issued, for redaction
+	mu     sync.Mutex
+	access string
+	expiry time.Time
+	seen   []string // every access token issued, for redaction
+	flight *tokenFlight
+}
+
+// tokenFlight is one token refresh. done closes once token and err are set.
+type tokenFlight struct {
+	done  chan struct{}
+	token string
+	err   error
 }
 
 // Client uploads to one Dropbox account. It is safe for concurrent use.
@@ -223,16 +235,65 @@ func newDefaultTransport() *http.Transport {
 	}
 }
 
-// accessToken returns a cached access token or refreshes it.
+const opRefreshToken = "RefreshToken"
+
+// accessToken returns a cached access token or waits for a refresh. Callers
+// share one refresh at a time; each waiter stops waiting as soon as its own
+// ctx ends. The refresh runs on a context detached from the caller that
+// started it (so its cancellation never fails the other waiters), bounded
+// by the RPC timeout.
 func (c *Client) accessToken(ctx context.Context) (string, error) {
-	c.tok.refresh.Lock()
-	defer c.tok.refresh.Unlock()
 	c.tok.mu.Lock()
-	access, expiry := c.tok.access, c.tok.expiry
-	c.tok.mu.Unlock()
-	if access != "" && c.now().Before(expiry) {
+	if c.tok.access != "" && c.now().Before(c.tok.expiry) {
+		access := c.tok.access
+		c.tok.mu.Unlock()
 		return access, nil
 	}
+	if err := ctx.Err(); err != nil {
+		c.tok.mu.Unlock()
+		return "", &Error{Op: opRefreshToken, Kind: err}
+	}
+	f := c.tok.flight
+	if f == nil {
+		f = &tokenFlight{done: make(chan struct{})}
+		c.tok.flight = f
+		go c.runRefresh(context.WithoutCancel(ctx), f)
+	}
+	c.tok.mu.Unlock()
+	select {
+	case <-f.done:
+		return f.token, f.err
+	case <-ctx.Done():
+		return "", &Error{Op: opRefreshToken, Kind: ctx.Err()}
+	}
+}
+
+// runRefresh performs flight f and caches its token.
+func (c *Client) runRefresh(base context.Context, f *tokenFlight) {
+	ctx, cancel := context.WithTimeout(base, c.rpcTimeout)
+	defer cancel()
+	tok, lifetime, err := c.fetchToken(ctx)
+	if err != nil && ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded) {
+		// The refresh's own bound, not a caller's deadline.
+		err = &Error{Op: opRefreshToken, Kind: ErrNetwork, Err: &timeoutError{msg: fmt.Sprintf("token refresh timed out after %s", c.rpcTimeout)}}
+	}
+	c.tok.mu.Lock()
+	if err == nil {
+		margin := refreshMargin
+		if lifetime < 2*margin {
+			margin = lifetime / 2
+		}
+		c.tok.access = tok
+		c.tok.expiry = c.now().Add(lifetime - margin)
+	}
+	f.token, f.err = tok, err
+	c.tok.flight = nil
+	c.tok.mu.Unlock()
+	close(f.done)
+}
+
+// fetchToken trades the refresh token for an access token and its lifetime.
+func (c *Client) fetchToken(ctx context.Context) (string, time.Duration, error) {
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {c.refreshToken},
@@ -240,7 +301,7 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 		"client_secret": {c.appSecret},
 	}
 	resp, err := c.call(ctx, request{
-		op:          "RefreshToken",
+		op:          opRefreshToken,
 		url:         c.ep.auth + "/oauth2/token",
 		contentType: "application/x-www-form-urlencoded",
 		body:        []byte(form.Encode()),
@@ -248,30 +309,27 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 		tokenCall:   true,
 	})
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	var out struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   int64  `json:"expires_in"`
 	}
 	if err := json.Unmarshal(resp.body, &out); err != nil || out.AccessToken == "" {
-		return "", &Error{Op: "RefreshToken", Kind: ErrUnexpected, StatusCode: resp.status, Summary: "token response has no access token"}
+		return "", 0, &Error{Op: opRefreshToken, Kind: ErrUnexpected, StatusCode: resp.status, Summary: "token response has no access token"}
 	}
-	issued := c.now()
-	lifetime := time.Duration(out.ExpiresIn) * time.Second
-	margin := refreshMargin
-	if lifetime < 2*margin {
-		margin = lifetime / 2
-	}
+	// Remember the token for redaction before anything can echo it.
 	c.tok.mu.Lock()
-	defer c.tok.mu.Unlock()
-	c.tok.access = out.AccessToken
-	c.tok.expiry = issued.Add(lifetime - margin)
 	c.tok.seen = append(c.tok.seen, out.AccessToken)
 	if len(c.tok.seen) > maxRememberedTokens {
 		c.tok.seen = c.tok.seen[len(c.tok.seen)-maxRememberedTokens:]
 	}
-	return out.AccessToken, nil
+	c.tok.mu.Unlock()
+	lifetime := time.Duration(out.ExpiresIn) * time.Second
+	if out.ExpiresIn <= 0 || out.ExpiresIn > 24*3600 {
+		lifetime = defaultTokenLifetime
+	}
+	return out.AccessToken, lifetime, nil
 }
 
 // dropAccessToken forgets token so the next request refreshes it.

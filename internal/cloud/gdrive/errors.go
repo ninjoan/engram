@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -81,11 +82,21 @@ const (
 var quotaReasons = map[string]bool{
 	"storageQuotaExceeded":    true,
 	"userUploadLimitExceeded": true,
+	"dailyLimitExceeded":      true,
 }
 
 var rateLimitReasons = map[string]bool{
-	"rateLimitExceeded":     true,
-	"userRateLimitExceeded": true,
+	"rateLimitExceeded":        true,
+	"userRateLimitExceeded":    true,
+	"sharingRateLimitExceeded": true,
+}
+
+// authReasons are the only Drive API reasons that mean the stored
+// authorization no longer works. Every other 403 (domainPolicy, forbidden,
+// ...) is a refusal reconnecting would not fix.
+var authReasons = map[string]bool{
+	"authError":               true,
+	"insufficientPermissions": true,
 }
 
 var oauthAuthErrors = map[string]bool{
@@ -144,12 +155,15 @@ func (c *Client) responseError(cl call, resp *response) *Error {
 		e.Kind = ErrQuota
 	case s == http.StatusTooManyRequests, rateLimitReasons[rawReason]:
 		e.Kind = ErrRateLimited
-	case s == http.StatusUnauthorized, s == http.StatusForbidden, oauthAuthErrors[rawReason]:
+	case s == http.StatusUnauthorized, oauthAuthErrors[rawReason], s == http.StatusForbidden && authReasons[rawReason]:
 		e.Kind = ErrAuth
 	case s == http.StatusNotFound:
 		e.Kind = ErrNotFound
 	default:
 		e.Kind = ErrUnexpected
+		if s == http.StatusForbidden && e.Message == "" {
+			e.Message = "Google refused the request"
+		}
 	}
 	return e
 }
@@ -165,8 +179,8 @@ func (c *Client) sanitize(s string, limit int, extra []string) string {
 		return r
 	}, s)
 	for _, secret := range append([]string{c.clientSecret, c.refreshToken}, extra...) {
-		if secret != "" {
-			s = strings.ReplaceAll(s, secret, redacted)
+		for _, form := range secretForms(secret) {
+			s = strings.ReplaceAll(s, form, redacted)
 		}
 	}
 	s = strings.Join(strings.Fields(s), " ")
@@ -178,4 +192,63 @@ func (c *Client) sanitize(s string, limit int, extra []string) string {
 		s = s[:cut] + "…"
 	}
 	return s
+}
+
+// secretForms returns secret as sent and its URL-encoded and URL-decoded
+// variants (a server may echo a form or query value in any of them).
+func secretForms(secret string) []string {
+	if secret == "" {
+		return nil
+	}
+	forms := []string{secret}
+	add := func(v string) {
+		if v == "" {
+			return
+		}
+		for _, f := range forms {
+			if f == v {
+				return
+			}
+		}
+		forms = append(forms, v)
+	}
+	add(url.QueryEscape(secret))
+	add(url.PathEscape(secret))
+	if v, err := url.QueryUnescape(secret); err == nil {
+		add(v)
+	}
+	if v, err := url.PathUnescape(secret); err == nil {
+		add(v)
+	}
+	return forms
+}
+
+// sessionSecrets lists the forms of a resumable session URI that must never
+// reach an error: the URI is a bearer capability, so its upload_id value is
+// redacted on its own too.
+func sessionSecrets(uri string) []string {
+	if uri == "" {
+		return nil
+	}
+	out := []string{uri}
+	if u, err := url.Parse(uri); err == nil {
+		if u.RawQuery != "" {
+			out = append(out, u.RawQuery)
+		}
+		if raw, ok := rawQueryValue(u.RawQuery, "upload_id"); ok {
+			out = append(out, raw)
+		}
+	}
+	return out
+}
+
+// rawQueryValue returns the still-encoded value of key in rawQuery.
+func rawQueryValue(rawQuery, key string) (string, bool) {
+	for _, kv := range strings.Split(rawQuery, "&") {
+		k, v, _ := strings.Cut(kv, "=")
+		if k == key && v != "" {
+			return v, true
+		}
+	}
+	return "", false
 }

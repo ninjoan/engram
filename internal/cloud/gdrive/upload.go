@@ -23,8 +23,11 @@ import (
 // Range header continues from the confirmed offset. After a network error,
 // stall or 5xx, a status probe (Content-Range: bytes */size) finds the
 // confirmed offset. Rate limits back off exponentially with jitter. All
-// retries are bounded; an expired or rejected session is replaced by a new
-// one, from offset 0, at most once. ctx bounds the total duration.
+// retries are bounded; an expired or rejected session (404, 410, other 4xx
+// except 403) is replaced by a new one, from offset 0, at most once. A 403
+// that is not a quota or rate limit, and a failed token refresh, end the
+// upload. Errors never contain the session URI or its upload_id. ctx bounds
+// the total duration.
 func (c *Client) Upload(ctx context.Context, folderID, name string, body io.ReadSeeker, size int64) (fileID string, err error) {
 	const op = "Upload"
 	if !fileIDPattern.MatchString(folderID) {
@@ -145,7 +148,7 @@ func (c *Client) sendSession(ctx context.Context, op, uri string, body io.ReadSe
 			}
 			resp, tok, err = c.putSession(ctx, op, uri, fmt.Sprintf("bytes %d-%d/%d", offset, offset+n-1, size), buf[:n])
 		}
-		res := c.uploadResult(op, resp, tok, err, size)
+		res := c.uploadResult(op, uri, resp, tok, err, size)
 		switch res.kind {
 		case outcomeDone:
 			return res.id, nil
@@ -213,8 +216,16 @@ func (c *Client) putSession(ctx context.Context, op, uri, contentRange string, c
 	}
 }
 
-func (c *Client) uploadResult(op string, resp *response, tok string, err error, size int64) result {
+// uploadResult classifies one PUT to the session uri. Server text is
+// sanitized with the access token and every form of the session URI (a
+// bearer capability) redacted. A failed token refresh is fatal: it already
+// had its own bounded retries and must not be multiplied by chunk retries.
+func (c *Client) uploadResult(op, uri string, resp *response, tok string, err error, size int64) result {
 	if err != nil {
+		var ge *Error
+		if errors.As(err, &ge) && ge.Op == opTokenRefresh {
+			return result{kind: outcomeFatal, err: err}
+		}
 		if retryable(err) {
 			return result{kind: outcomeTransient, err: err}
 		}
@@ -234,11 +245,13 @@ func (c *Client) uploadResult(op string, resp *response, tok string, err error, 
 		}
 		return result{kind: outcomeIncomplete, next: next}
 	}
-	e := c.responseError(call{op: op, token: tok}, resp)
+	e := c.responseError(call{op: op, token: tok, secrets: sessionSecrets(uri)}, resp)
 	switch {
 	case retryable(e):
 		return result{kind: outcomeTransient, err: e, retryAfter: parseRetryAfter(resp.header)}
-	case e.Kind == ErrQuota, e.Kind == ErrAuth, e.Kind == ErrRedirect:
+	case e.Kind == ErrQuota, e.Kind == ErrAuth, e.Kind == ErrRedirect, resp.status == http.StatusForbidden:
+		// A 403 that is not a quota or rate limit (domainPolicy, ...) would
+		// refuse a new session the same way.
 		return result{kind: outcomeFatal, err: e}
 	case resp.status >= 400 && resp.status < 500:
 		return result{kind: outcomeInvalid, err: e}
