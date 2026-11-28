@@ -203,8 +203,8 @@ func (cs *CloudStore) ConsumeBackupOAuthState(ctx context.Context, opener Backup
 
 // CheckBackupOAuthBinding reports ErrBackupOAuthDestinationChanged unless
 // the stored Google Drive destination still has binding, the value a
-// consumed state returned. The callback calls it again right before storing
-// the refresh token.
+// consumed state returned. The callback calls it before the code exchange;
+// SetGDriveRefreshToken compares the binding again under the row lock.
 func (cs *CloudStore) CheckBackupOAuthBinding(ctx context.Context, binding string) error {
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")
@@ -237,9 +237,15 @@ func readBackupOAuthBinding(ctx context.Context, q backupOAuthQueryer) (string, 
 	if kind != BackupDestinationKindGDrive {
 		return "", fmt.Errorf("%w: it is a %s destination, not gdrive", ErrBackupDestinationKindMismatch, kind)
 	}
+	return backupOAuthBinding(kind, clientID, folder, fingerprint, updatedAt), nil
+}
+
+// backupOAuthBinding hashes the fields of a destination row that every save
+// and authorization moves forward.
+func backupOAuthBinding(kind, clientID, folder, fingerprint string, updatedAt time.Time) string {
 	bound, _ := json.Marshal([]string{kind, clientID, folder, fingerprint, updatedAt.UTC().Format(time.RFC3339Nano)})
 	sum := sha256.Sum256(bound)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
 }
 
 func backupOAuthStateHash(state string) string {

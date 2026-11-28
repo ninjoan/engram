@@ -706,7 +706,7 @@ const backupDropboxAuthorizeURL = "https://www.dropbox.com/oauth2/authorize?clie
 
 // backupDropboxTokenExchange trades the authorization code for a refresh
 // token at the Dropbox token endpoint.
-const backupDropboxTokenExchange = `curl https://api.dropboxapi.com/oauth2/token \
+const backupDropboxTokenExchange = `curl https://api.dropbox.com/oauth2/token \
   -d code=AUTHORIZATION_CODE \
   -d grant_type=authorization_code \
   -u APP_KEY:APP_SECRET`

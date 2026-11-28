@@ -304,7 +304,7 @@ func TestPutGDriveDestinationIsPendingUntilAuthorized(t *testing.T) {
 	}
 
 	time.Sleep(5 * time.Millisecond) // updated_at must move
-	if err := cs.SetGDriveRefreshToken(ctx, sealer, " "+testGDriveRefreshToken+" ", actor); err != nil {
+	if err := cs.SetGDriveRefreshToken(ctx, sealer, gdriveBinding(t, cs), " "+testGDriveRefreshToken+" ", actor); err != nil {
 		t.Fatalf("SetGDriveRefreshToken: %v", err)
 	}
 	assertNoKindSecrets(t, "destination row", destinationRowText(t, cs))
@@ -345,20 +345,20 @@ func TestGDriveDestinationRefreshTokenRefusals(t *testing.T) {
 	actor := BackupDestinationActor{PrincipalID: adminID, Source: "dashboard"}
 	var nilSealer *backupcrypto.Sealer
 
-	if err := cs.SetGDriveRefreshToken(ctx, sealer, testGDriveRefreshToken, actor); !errors.Is(err, ErrBackupDestinationNotConfigured) {
+	if err := cs.SetGDriveRefreshToken(ctx, sealer, gdriveBinding(t, cs), testGDriveRefreshToken, actor); !errors.Is(err, ErrBackupDestinationNotConfigured) {
 		t.Fatalf("no destination: %v", err)
 	}
 	if err := cs.PutBackupDestination(ctx, validDestinationParams(adminID), sealer); err != nil {
 		t.Fatal(err)
 	}
-	if err := cs.SetGDriveRefreshToken(ctx, sealer, testGDriveRefreshToken, actor); !errors.Is(err, ErrBackupDestinationKindMismatch) {
+	if err := cs.SetGDriveRefreshToken(ctx, sealer, gdriveBinding(t, cs), testGDriveRefreshToken, actor); !errors.Is(err, ErrBackupDestinationKindMismatch) {
 		t.Fatalf("s3 destination: %v", err)
 	}
 	if err := cs.PutGDriveDestination(ctx, validGDriveParams(adminID), sealer); err != nil {
 		t.Fatal(err)
 	}
 	for name, token := range map[string]string{"empty": "  ", "space": "a b", "control": "tok\x00en", "too long": strings.Repeat("t", 4097), "non-ascii": "tökén"} {
-		err := cs.SetGDriveRefreshToken(ctx, sealer, token, actor)
+		err := cs.SetGDriveRefreshToken(ctx, sealer, gdriveBinding(t, cs), token, actor)
 		if !errors.Is(err, ErrInvalidBackupDestination) || !strings.HasPrefix(backupReason(err), "refresh token ") {
 			t.Fatalf("%s token: %v", name, err)
 		}
@@ -366,10 +366,10 @@ func TestGDriveDestinationRefreshTokenRefusals(t *testing.T) {
 			t.Fatalf("%s: error echoes the token: %v", name, err)
 		}
 	}
-	if err := cs.SetGDriveRefreshToken(ctx, nilSealer, testGDriveRefreshToken, actor); !errors.Is(err, ErrBackupDestinationKeyRequired) {
+	if err := cs.SetGDriveRefreshToken(ctx, nilSealer, gdriveBinding(t, cs), testGDriveRefreshToken, actor); !errors.Is(err, ErrBackupDestinationKeyRequired) {
 		t.Fatalf("typed-nil sealer: %v", err)
 	}
-	if err := cs.SetGDriveRefreshToken(ctx, testBackupSealer(t, 2), testGDriveRefreshToken, actor); !errors.Is(err, ErrBackupDestinationKeyChanged) {
+	if err := cs.SetGDriveRefreshToken(ctx, testBackupSealer(t, 2), gdriveBinding(t, cs), testGDriveRefreshToken, actor); !errors.Is(err, ErrBackupDestinationKeyChanged) {
 		t.Fatalf("other key: %v", err)
 	}
 	if n := countRows(t, cs, `SELECT COUNT(*) FROM cloud_auth_audit_log WHERE action = 'backup.destination.authorize'`); n != 0 {
@@ -412,7 +412,7 @@ func TestKindSecretsAreBoundToTheirDestination(t *testing.T) {
 			if err := cs.PutGDriveDestination(ctx, validGDriveParams(id), sealer); err != nil {
 				return err
 			}
-			return cs.SetGDriveRefreshToken(ctx, sealer, testGDriveRefreshToken, BackupDestinationActor{PrincipalID: id, Source: "dashboard"})
+			return cs.SetGDriveRefreshToken(ctx, sealer, gdriveBinding(t, cs), testGDriveRefreshToken, BackupDestinationActor{PrincipalID: id, Source: "dashboard"})
 		}, mutate: `UPDATE cloud_backup_destinations SET refresh_token_ciphertext = client_secret_ciphertext`},
 	} {
 		t.Run(name, func(t *testing.T) {

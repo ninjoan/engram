@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -227,13 +228,17 @@ func (cs *CloudStore) PutGDriveDestination(ctx context.Context, params PutGDrive
 
 // SetGDriveRefreshToken seals the OAuth refresh token of the stored Google
 // Drive destination, bound to that destination, and audits
-// backup.destination.authorize in the same transaction. It refuses with
-// ErrBackupDestinationNotConfigured when no destination is stored,
-// ErrBackupDestinationKindMismatch for another kind,
-// ErrBackupDestinationKeyChanged when the destination was saved with another
-// key, and ErrInvalidBackupDestination for a malformed token; a refusal
-// writes nothing.
-func (cs *CloudStore) SetGDriveRefreshToken(ctx context.Context, sealer BackupSecretSealer, refreshToken string, actor BackupDestinationActor) error {
+// backup.destination.authorize in the same transaction. binding is the
+// destination binding the consumed OAuth state returned
+// (BackupOAuthGrant.Binding); it is compared under the destination row lock,
+// so a save that lands after the code exchange is never authorized with the
+// old client's token. It refuses with ErrBackupDestinationNotConfigured when
+// no destination is stored, ErrBackupDestinationKindMismatch for another
+// kind, ErrBackupDestinationKeyChanged when the destination was saved with
+// another key, ErrBackupOAuthDestinationChanged when the destination no
+// longer has binding, and ErrInvalidBackupDestination for a malformed token;
+// a refusal writes nothing.
+func (cs *CloudStore) SetGDriveRefreshToken(ctx context.Context, sealer BackupSecretSealer, binding, refreshToken string, actor BackupDestinationActor) error {
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")
 	}
@@ -251,8 +256,9 @@ func (cs *CloudStore) SetGDriveRefreshToken(ctx context.Context, sealer BackupSe
 	defer func() { _ = tx.Rollback() }()
 	target := backupDestinationTarget{}
 	var fingerprint string
-	err = tx.QueryRowContext(ctx, `SELECT kind, client_id, folder, key_fingerprint FROM cloud_backup_destinations WHERE id = 1 FOR UPDATE`).
-		Scan(&target.kind, &target.clientID, &target.folder, &fingerprint)
+	var updatedAt time.Time
+	err = tx.QueryRowContext(ctx, `SELECT kind, client_id, folder, key_fingerprint, updated_at FROM cloud_backup_destinations WHERE id = 1 FOR UPDATE`).
+		Scan(&target.kind, &target.clientID, &target.folder, &fingerprint, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrBackupDestinationNotConfigured
 	}
@@ -264,6 +270,9 @@ func (cs *CloudStore) SetGDriveRefreshToken(ctx context.Context, sealer BackupSe
 	}
 	if fingerprint != sealer.Fingerprint() {
 		return ErrBackupDestinationKeyChanged
+	}
+	if binding == "" || backupOAuthBinding(target.kind, target.clientID, target.folder, fingerprint, updatedAt) != binding {
+		return ErrBackupOAuthDestinationChanged
 	}
 	tokenCipher, err := sealer.Seal(target.associatedData(backupDestinationFieldRefreshToken), []byte(token))
 	if err != nil {

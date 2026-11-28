@@ -105,7 +105,7 @@ func TestAdminBackupsDropboxFormForANewDestination(t *testing.T) {
 		"Scoped access", "App folder", "Full Dropbox",
 		"<code>files.content.write</code>", "<code>files.metadata.read</code>",
 		"https://www.dropbox.com/oauth2/authorize?client_id=APP_KEY&amp;response_type=code&amp;token_access_type=offline",
-		"curl https://api.dropboxapi.com/oauth2/token",
+		"curl https://api.dropbox.com/oauth2/token",
 		"-d grant_type=authorization_code", "-u APP_KEY:APP_SECRET", "<code>refresh_token</code>",
 		`formaction="/dashboard/admin/backups/destination/check"`,
 		">Test connection</button>", ">Save destination</button>",
@@ -272,5 +272,44 @@ func TestAdminBackupsConfiguredS3ChoosingDropboxOpensChangeDestination(t *testin
 	}
 	if _, selected := renderedStorageOptions(t, plain); selected != "s3" {
 		t.Fatalf("configured S3 storage = %q", selected)
+	}
+}
+
+// Choosing S3 on a saved Dropbox or Google Drive destination says that
+// saving replaces that destination; it never claims the S3 form is
+// pre-filled or that a saved S3 key keeps working. A saved S3 destination
+// keeps its own hint.
+func TestAdminBackupsChangeToS3HintNamesTheSavedKind(t *testing.T) {
+	const s3Hint = "pre-filled with the endpoint"
+	for name, tc := range map[string]struct {
+		destination cloudstore.BackupDestination
+		want        string
+	}{
+		"dropbox": {configuredDropboxDestination(), "Saving S3 settings replaces the current Dropbox destination: its saved credentials stop working."},
+		"gdrive":  {gdriveDestination(true), "Saving S3 settings replaces the current Google Drive destination: its saved credentials and authorization stop working."},
+	} {
+		t.Run(name, func(t *testing.T) {
+			v := readyBackupsView(tc.destination)
+			v.StorageKind, v.StorageKindChosen = cloudstore.BackupDestinationKindS3, true
+			body := renderBackupsPageForTest(t, v)
+			start := strings.Index(body, "<summary>Change destination</summary>")
+			if start < 0 {
+				t.Fatalf("no Change destination, body=%q", body)
+			}
+			change := body[start:]
+			if !strings.Contains(change, `class="backup-provider-form" autocomplete="off"`) {
+				t.Fatalf("Change destination must hold the S3 form, body=%q", change)
+			}
+			if !strings.Contains(change, tc.want) {
+				t.Fatalf("hint must name the saved kind %q, body=%q", tc.want, change)
+			}
+			if strings.Contains(change, s3Hint) || strings.Contains(change, "keeps working until you save") || strings.Contains(change, tc.destination.AccessKeyIDHint+"</code>") {
+				t.Fatalf("hint describes a saved S3 destination, body=%q", change)
+			}
+		})
+	}
+	s3 := renderBackupsPageForTest(t, readyBackupsView(configuredR2Destination()))
+	if !strings.Contains(s3, s3Hint) || strings.Contains(s3, "Saving S3 settings replaces the current") {
+		t.Fatalf("a saved S3 destination keeps its hint, body=%q", s3)
 	}
 }

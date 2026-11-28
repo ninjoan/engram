@@ -66,9 +66,12 @@ type fakeBackupSettingsStore struct {
 	putGDrive    []cloudstore.PutGDriveDestinationParams
 	gdriveTokens []fakeGDriveToken
 	setTokenErr  error
-	oauthStates  map[string]fakeOAuthState
-	oauthCreates int
-	oauthUsed    int
+	// beforeSetToken runs as SetGDriveRefreshToken starts, before it takes
+	// the destination lock: a save landing right before the token write.
+	beforeSetToken func()
+	oauthStates    map[string]fakeOAuthState
+	oauthCreates   int
+	oauthUsed      int
 	// bindingVersion moves on every destination write, like updated_at.
 	bindingVersion int
 
@@ -238,8 +241,12 @@ func (f *fakeBackupSettingsStore) PutGDriveDestination(_ context.Context, params
 	return nil
 }
 
-// SetGDriveRefreshToken authorizes the stored Google Drive destination.
-func (f *fakeBackupSettingsStore) SetGDriveRefreshToken(_ context.Context, sealer cloudstore.BackupSecretSealer, token string, actor cloudstore.BackupDestinationActor) error {
+// SetGDriveRefreshToken authorizes the stored Google Drive destination
+// while it still has binding, like the real store.
+func (f *fakeBackupSettingsStore) SetGDriveRefreshToken(_ context.Context, sealer cloudstore.BackupSecretSealer, binding, token string, actor cloudstore.BackupDestinationActor) error {
+	if f.beforeSetToken != nil {
+		f.beforeSetToken()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.setTokenErr != nil {
@@ -250,6 +257,9 @@ func (f *fakeBackupSettingsStore) SetGDriveRefreshToken(_ context.Context, seale
 	}
 	if f.destination.Kind != cloudstore.BackupDestinationKindGDrive {
 		return cloudstore.ErrBackupDestinationKindMismatch
+	}
+	if current, _ := f.currentBinding(); current != binding {
+		return cloudstore.ErrBackupOAuthDestinationChanged
 	}
 	f.gdriveTokens = append(f.gdriveTokens, fakeGDriveToken{token: token, sealer: sealer, actor: actor})
 	f.destination.GDrive.Authorized = true

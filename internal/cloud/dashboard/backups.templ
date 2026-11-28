@@ -198,7 +198,13 @@ templ backupDestinationBlock(v BackupsPageView) {
 							<p class="hint">Saving replaces the current destination and needs Connect with Google again. The client secret field starts empty; the saved settings keep working until you save.</p>
 							@backupGDriveForm(v)
 						default:
-							<p class="hint">The same grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
+							if v.isDropboxDestination() {
+								<p class="hint">Saving S3 settings replaces the current Dropbox destination: its saved credentials stop working. Saving resets the status to <strong>Not tested</strong>.</p>
+							} else if v.isGDriveDestination() {
+								<p class="hint">Saving S3 settings replaces the current Google Drive destination: its saved credentials and authorization stop working. Saving resets the status to <strong>Not tested</strong>.</p>
+							} else {
+								<p class="hint">The same grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
+							}
 							@backupDestinationForm(v)
 					}
 				</details>

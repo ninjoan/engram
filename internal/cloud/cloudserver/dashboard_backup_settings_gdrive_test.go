@@ -525,6 +525,32 @@ func TestDashboardGDriveCallbackRefusesADestinationChangedDuringTheExchange(t *t
 	}
 }
 
+// A save that lands after the exchange, right before the token write, is
+// caught by the write itself: the binding is compared under the
+// destination lock, so no token is stored and the failure is audited.
+func TestDashboardGDriveCallbackRefusesADestinationChangedRightBeforeTheTokenWrite(t *testing.T) {
+	f := gdriveBackupFixture(t, pendingGDriveSettings())
+	consent := connectGDrive(t, f)
+	f.google.err = nil
+	settings := f.settings
+	settings.beforeSetToken = func() {
+		settings.mu.Lock()
+		settings.bindingVersion++ // saved again between the exchange and the write
+		settings.mu.Unlock()
+	}
+	rec := gdriveCallbackRequest(f, url.Values{"state": {consent.Query().Get("state")}, "code": {testGDriveCode}}, f.cookie, nil)
+	if dashboardRedirect(rec) != backupsPagePath+"?notice=gdrive-mismatch" {
+		t.Fatalf("callback = %q, want gdrive-mismatch", dashboardRedirect(rec))
+	}
+	if len(settings.gdriveTokens) != 0 || settings.destination.GDrive.Authorized || settings.gdriveCreds.RefreshToken != "" {
+		t.Fatalf("a changed destination was authorized: tokens %d, authorized %v", len(settings.gdriveTokens), settings.destination.GDrive.Authorized)
+	}
+	events := backupAuditEvents(f.audit, cloudstore.AuthAuditActionBackupDestinationAuthorize)
+	if len(events) != 1 || events[0].Outcome != authAuditOutcomeFailure || events[0].ReasonCode != backupReasonDestinationChanged {
+		t.Fatalf("authorize audits = %+v, want one destination-changed failure", events)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }

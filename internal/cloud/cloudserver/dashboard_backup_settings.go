@@ -38,8 +38,9 @@ type BackupSettingsStore interface {
 	PutDropboxDestination(ctx context.Context, params cloudstore.PutDropboxDestinationParams, sealer cloudstore.BackupSecretSealer) error
 	PutGDriveDestination(ctx context.Context, params cloudstore.PutGDriveDestinationParams, sealer cloudstore.BackupSecretSealer) error
 	// SetGDriveRefreshToken stores the refresh token of the Google Drive
-	// destination after Connect with Google, sealed and audited.
-	SetGDriveRefreshToken(ctx context.Context, sealer cloudstore.BackupSecretSealer, refreshToken string, actor cloudstore.BackupDestinationActor) error
+	// destination after Connect with Google, sealed and audited, only while
+	// the destination still has binding (compared in the same transaction).
+	SetGDriveRefreshToken(ctx context.Context, sealer cloudstore.BackupSecretSealer, binding, refreshToken string, actor cloudstore.BackupDestinationActor) error
 	// CreateBackupOAuthState, ConsumeBackupOAuthState and
 	// CheckBackupOAuthBinding keep the single-use state of a Connect with
 	// Google authorization (cloudstore/backup_oauth.go).
@@ -385,6 +386,19 @@ func (s *CloudServer) backupSettingsActor(w http.ResponseWriter, r *http.Request
 	return actor, true
 }
 
+// backupPostedKind is the kind field of the POST body. single is false when
+// the field is repeated: a form carries at most one kind, so no value wins.
+func backupPostedKind(r *http.Request) (kind string, single bool) {
+	values := r.PostForm["kind"]
+	if len(values) > 1 {
+		return "", false
+	}
+	if len(values) == 1 {
+		kind = values[0]
+	}
+	return kind, true
+}
+
 func backupStoreActor(actor cloudauth.Principal) cloudstore.BackupDestinationActor {
 	return cloudstore.BackupDestinationActor{PrincipalID: strings.TrimSpace(actor.ID), Source: string(actor.Source)}
 }
@@ -401,12 +415,12 @@ func (s *CloudServer) handleDashboardSaveBackupDestination(w http.ResponseWriter
 	if !parseDashboardMutationForm(w, r) {
 		return
 	}
-	switch r.PostForm.Get("kind") {
-	case "", cloudstore.BackupDestinationKindS3:
-	case cloudstore.BackupDestinationKindDropbox:
+	switch kind, single := backupPostedKind(r); {
+	case single && (kind == "" || kind == cloudstore.BackupDestinationKindS3):
+	case single && kind == cloudstore.BackupDestinationKindDropbox:
 		s.saveDropboxDestination(w, r, actor)
 		return
-	case cloudstore.BackupDestinationKindGDrive:
+	case single && kind == cloudstore.BackupDestinationKindGDrive:
 		s.saveGDriveDestination(w, r, actor)
 		return
 	default:
@@ -640,12 +654,12 @@ func (s *CloudServer) handleDashboardCheckBackupDestination(w http.ResponseWrite
 	if !ok {
 		return
 	}
-	switch r.PostForm.Get("kind") {
-	case "", cloudstore.BackupDestinationKindS3:
-	case cloudstore.BackupDestinationKindDropbox:
+	switch kind, single := backupPostedKind(r); {
+	case single && (kind == "" || kind == cloudstore.BackupDestinationKindS3):
+	case single && kind == cloudstore.BackupDestinationKindDropbox:
 		s.checkDropboxDestination(w, r, actor, store)
 		return
-	case cloudstore.BackupDestinationKindGDrive:
+	case single && kind == cloudstore.BackupDestinationKindGDrive:
 		s.refuseGDriveCheck(w, r, actor)
 		return
 	default:

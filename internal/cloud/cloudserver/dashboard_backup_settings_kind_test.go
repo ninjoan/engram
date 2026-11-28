@@ -60,6 +60,41 @@ func TestDashboardBackupsPageRendersNonS3DestinationKinds(t *testing.T) {
 	}
 }
 
+// A repeated kind field is refused with 400 on save and check: nothing is
+// stored, checked, opened or audited, whichever value comes first.
+func TestDashboardBackupDestinationRefusesARepeatedKind(t *testing.T) {
+	forms := map[string]string{
+		"dropbox then gdrive": validDropboxForm + "&kind=gdrive",
+		"dropbox then s3":     validDropboxForm + "&kind=s3",
+		"s3 then dropbox":     validBackupDestinationForm + "&kind=s3&kind=dropbox",
+		"same value twice":    validDropboxForm + "&kind=dropbox",
+		"empty then dropbox":  validDropboxForm + "&kind=",
+	}
+	for name, form := range forms {
+		for _, path := range []string{backupDestinationPath, backupDestinationCheckPath} {
+			t.Run(name+" "+path, func(t *testing.T) {
+				f := emptyBackupFixture(t)
+				rec := doBackupRequest(f.srv, backupRequest{method: http.MethodPost, path: path, form: form, cookie: f.cookie})
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400", rec.Code)
+				}
+				if !strings.Contains(rec.Body.String(), "choose S3-compatible, Dropbox or Google Drive storage") {
+					t.Fatalf("refusal does not name the kind, body=%q", rec.Body.String())
+				}
+				if f.settings.mutations() != 0 || f.dropbox.calls != 0 || f.checker.calls != 0 || backupAuditCount(f.audit) != 0 || f.settings.destination.Configured {
+					t.Fatalf("a repeated kind had effects: store %d, dropbox %d, s3 %d, audit %d", f.settings.mutations(), f.dropbox.calls, f.checker.calls, backupAuditCount(f.audit))
+				}
+			})
+		}
+	}
+	// A single kind still saves (previous behavior).
+	f := emptyBackupFixture(t)
+	rec := doBackupRequest(f.srv, backupRequest{method: http.MethodPost, path: backupDestinationPath, form: validDropboxForm, cookie: f.cookie})
+	if rec.Code != http.StatusSeeOther || len(f.settings.putDropbox) != 1 {
+		t.Fatalf("single kind save = %d, puts %d", rec.Code, len(f.settings.putDropbox))
+	}
+}
+
 func TestDashboardTestBackupConnectionRefusesNonS3Kind(t *testing.T) {
 	f := managedBackupFixture(t)
 	f.settings.destination = cloudstore.BackupDestination{Configured: true, Kind: cloudstore.BackupDestinationKindGDrive, GDrive: cloudstore.GDriveDestinationView{ClientID: "1234-abcd.apps.googleusercontent.com", FolderName: "Engram backups"}}

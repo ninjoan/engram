@@ -203,13 +203,69 @@ func TestBackupOAuthStateIsBoundToTheDestination(t *testing.T) {
 			t.Fatalf("consume: %v", err)
 		}
 		time.Sleep(5 * time.Millisecond)
-		if err := cs.SetGDriveRefreshToken(ctx, sealer, testGDriveRefreshToken, BackupDestinationActor{PrincipalID: adminID, Source: "dashboard"}); err != nil {
+		if err := cs.SetGDriveRefreshToken(ctx, sealer, grant.Binding, testGDriveRefreshToken, BackupDestinationActor{PrincipalID: adminID, Source: "dashboard"}); err != nil {
 			t.Fatalf("SetGDriveRefreshToken: %v", err)
 		}
 		if err := cs.CheckBackupOAuthBinding(ctx, grant.Binding); !errors.Is(err, ErrBackupOAuthDestinationChanged) {
 			t.Fatalf("binding after authorize = %v, want %v", err, ErrBackupOAuthDestinationChanged)
 		}
 	})
+}
+
+// gdriveBinding is the binding of the stored Google Drive destination, the
+// value a consumed state returns; "" when there is none.
+func gdriveBinding(t *testing.T, cs *CloudStore) string {
+	t.Helper()
+	binding, err := readBackupOAuthBinding(context.Background(), cs.db)
+	if err != nil {
+		return ""
+	}
+	return binding
+}
+
+// The token write compares the consumed state's binding under the
+// destination row lock: a destination saved again between the consume and
+// the write (or a missing binding) is refused with
+// ErrBackupOAuthDestinationChanged, and nothing is written.
+func TestSetGDriveRefreshTokenRefusesAChangedOAuthBinding(t *testing.T) {
+	ctx := context.Background()
+	cs, adminID := gdriveOAuthStore(t)
+	sealer := testBackupSealer(t, 1)
+	actor := BackupDestinationActor{PrincipalID: adminID, Source: "dashboard"}
+	state, err := cs.CreateBackupOAuthState(ctx, sealer, adminID, testOAuthVerifier)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	grant, err := cs.ConsumeBackupOAuthState(ctx, sealer, state, adminID)
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond) // updated_at must move
+	if err := cs.PutGDriveDestination(ctx, validGDriveParams(adminID), sealer); err != nil {
+		t.Fatalf("save again: %v", err)
+	}
+	before := destinationRowText(t, cs)
+	for name, binding := range map[string]string{"stale": grant.Binding, "empty": ""} {
+		if err := cs.SetGDriveRefreshToken(ctx, sealer, binding, testGDriveRefreshToken, actor); !errors.Is(err, ErrBackupOAuthDestinationChanged) {
+			t.Fatalf("%s binding = %v, want %v", name, err, ErrBackupOAuthDestinationChanged)
+		}
+	}
+	if after := destinationRowText(t, cs); after != before {
+		t.Fatalf("a refused write changed the destination row:\nbefore %s\nafter  %s", before, after)
+	}
+	if got, err := cs.GetBackupDestination(ctx); err != nil || got.GDrive.Authorized {
+		t.Fatalf("a refused write authorized the destination: %+v, %v", got, err)
+	}
+	if n := countRows(t, cs, `SELECT COUNT(*) FROM cloud_auth_audit_log WHERE action = 'backup.destination.authorize'`); n != 0 {
+		t.Fatalf("refused writes recorded %d authorize audits", n)
+	}
+	// The current binding still authorizes.
+	if err := cs.SetGDriveRefreshToken(ctx, sealer, gdriveBinding(t, cs), testGDriveRefreshToken, actor); err != nil {
+		t.Fatalf("current binding: %v", err)
+	}
+	if got, err := cs.GetBackupDestination(ctx); err != nil || !got.GDrive.Authorized {
+		t.Fatalf("current binding did not authorize: %+v, %v", got, err)
+	}
 }
 
 // Unknown, malformed or tampered states are refused without touching any

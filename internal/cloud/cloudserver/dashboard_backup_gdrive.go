@@ -376,10 +376,9 @@ func (s *CloudServer) completeGDriveAuthorization(r *http.Request, actor cloudau
 		s.auditGDriveAuthorizeFailure(writeCtx, store, actor, creds, reason)
 		return notice
 	}
-	err = s.backupSettings.CheckBackupOAuthBinding(writeCtx, grant.Binding)
-	if err == nil {
-		err = s.backupSettings.SetGDriveRefreshToken(writeCtx, s.backupKey, token, backupStoreActor(actor))
-	}
+	// The binding is compared under the destination lock in the write's own
+	// transaction: a save landing during or after the exchange is refused.
+	err = s.backupSettings.SetGDriveRefreshToken(writeCtx, s.backupKey, grant.Binding, token, backupStoreActor(actor))
 	notice, done := gdriveStoreNotice(err)
 	if !done {
 		log.Printf("[engram-cloud] Google Drive destination authorized: actor=%q", actor.ID)
