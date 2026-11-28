@@ -162,3 +162,66 @@ func TestIsDefaultJWTSecret(t *testing.T) {
 		}
 	})
 }
+
+// S15: ENGRAM_CLOUD_PUBLIC_URL is the dashboard's public origin, the base of
+// the Google OAuth redirect URI. It must be an https origin (http only for a
+// loopback host) without path, query, fragment or userinfo; it is
+// normalized to scheme://host[:port]. An invalid value is reported, never
+// silently dropped.
+func TestConfigFromEnvPublicURL(t *testing.T) {
+	t.Run("absent leaves it empty without an error", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_PUBLIC_URL", " ")
+		cfg := ConfigFromEnv()
+		if cfg.PublicURL != "" || cfg.PublicURLError != nil {
+			t.Fatalf("blank public URL = (%q, %v)", cfg.PublicURL, cfg.PublicURLError)
+		}
+	})
+	for raw, want := range map[string]string{
+		"https://engram.example.com":       "https://engram.example.com",
+		" https://Engram.Example.com/ ":    "https://engram.example.com",
+		"HTTPS://engram.example.com:8443":  "https://engram.example.com:8443",
+		"http://localhost:8080":            "http://localhost:8080",
+		"http://127.0.0.1:18080/":          "http://127.0.0.1:18080",
+		"http://[::1]:8080":                "http://[::1]:8080",
+		"https://192.0.2.10":               "https://192.0.2.10",
+		"https://engram.example.com:443/":  "https://engram.example.com:443",
+		"http://LOCALHOST":                 "http://localhost",
+		"https://xn--engrm-sqa.example.io": "https://xn--engrm-sqa.example.io",
+	} {
+		t.Run("valid "+raw, func(t *testing.T) {
+			t.Setenv("ENGRAM_CLOUD_PUBLIC_URL", raw)
+			cfg := ConfigFromEnv()
+			if cfg.PublicURLError != nil || cfg.PublicURL != want {
+				t.Fatalf("public URL %q = (%q, %v), want %q", raw, cfg.PublicURL, cfg.PublicURLError, want)
+			}
+		})
+	}
+	for _, raw := range []string{
+		"engram.example.com",
+		"http://engram.example.com",
+		"http://192.0.2.10:8080",
+		"ftp://engram.example.com",
+		"https://",
+		"https://engram.example.com/dashboard",
+		"https://engram.example.com/?x=1",
+		"https://engram.example.com?",
+		"https://engram.example.com/#frag",
+		"https://user:pass@engram.example.com",
+		"https://engram.example.com:notaport",
+		"https://engram.example.com:0",
+		"https://engram.example.com:70000",
+		"https://exa mple.com",
+		"//engram.example.com",
+	} {
+		t.Run("invalid "+raw, func(t *testing.T) {
+			t.Setenv("ENGRAM_CLOUD_PUBLIC_URL", raw)
+			cfg := ConfigFromEnv()
+			if cfg.PublicURL != "" || !errors.Is(cfg.PublicURLError, ErrInvalidPublicURL) {
+				t.Fatalf("public URL %q = (%q, %v), want %v", raw, cfg.PublicURL, cfg.PublicURLError, ErrInvalidPublicURL)
+			}
+			if strings.Contains(cfg.PublicURLError.Error(), "pass@") {
+				t.Fatalf("error %q echoes userinfo", cfg.PublicURLError)
+			}
+		})
+	}
+}

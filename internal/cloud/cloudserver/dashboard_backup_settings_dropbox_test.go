@@ -97,8 +97,8 @@ func TestDashboardBackupsPageStorageKindQuery(t *testing.T) {
 		}
 	}
 	gdrive := performDashboardRequest(f.srv, http.MethodGet, backupsPagePath+"?kind=gdrive", f.cookie).Body.String()
-	if !strings.Contains(gdrive, "Google Drive is coming next") || strings.Contains(gdrive, `action="/dashboard/admin/backups/destination"`) {
-		t.Fatalf("?kind=gdrive must render only text, body=%q", gdrive)
+	if !strings.Contains(gdrive, `class="backup-provider-form backup-gdrive-form"`) || strings.Contains(gdrive, `class="backup-wizard"`) || strings.Contains(gdrive, "backup-dropbox-form") {
+		t.Fatalf("?kind=gdrive must render the Google Drive form, body=%q", gdrive)
 	}
 	if n := f.settings.mutations(); n != 0 || f.dropbox.calls != 0 || backupAuditCount(f.audit) != 0 {
 		t.Fatalf("viewing the page had side effects: store %d checks %d audits %d", n, f.dropbox.calls, backupAuditCount(f.audit))
@@ -179,9 +179,9 @@ func TestDashboardSaveDropboxDestinationRefusals(t *testing.T) {
 		})
 	}
 	f := emptyBackupFixture(t)
-	for _, kind := range []string{"gdrive", "ftp"} {
+	for _, kind := range []string{"ftp", "GDRIVE"} {
 		rec := doBackupRequest(f.srv, backupRequest{method: http.MethodPost, path: backupDestinationPath, form: dropboxForm(map[string]string{"kind": kind}), cookie: f.cookie})
-		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "choose S3-compatible or Dropbox storage") {
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "choose S3-compatible, Dropbox or Google Drive storage") {
 			t.Fatalf("kind %s = %d body=%q", kind, rec.Code, rec.Body.String())
 		}
 		assertNoDropboxSecret(t, "kind refusal", rec.Body.String())
@@ -301,11 +301,11 @@ func TestDashboardTestDropboxDestination(t *testing.T) {
 			assertNoDropboxSecret(t, "test page", page)
 		})
 	}
-	// A Google Drive destination still cannot be tested.
+	// A Google Drive destination is tested by its own check, never Dropbox's.
 	f := dropboxBackupFixture(t)
 	f.settings.destination = cloudstore.BackupDestination{Configured: true, Kind: cloudstore.BackupDestinationKindGDrive, GDrive: cloudstore.GDriveDestinationView{ClientID: "1234-abcd.apps.googleusercontent.com", FolderName: "Engram backups"}}
 	rec := doBackupRequest(f.srv, backupRequest{method: http.MethodPost, path: backupDestinationTestPath, cookie: f.cookie})
-	if dashboardRedirect(rec) != backupsPagePath+"?notice=test-unsupported" || f.dropbox.calls != 0 {
+	if dashboardRedirect(rec) != backupsPagePath+"?notice=gdrive-test-pending" || f.dropbox.calls != 0 {
 		t.Fatalf("gdrive test = %q calls %d", dashboardRedirect(rec), f.dropbox.calls)
 	}
 }

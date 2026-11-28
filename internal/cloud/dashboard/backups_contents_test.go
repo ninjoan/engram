@@ -96,7 +96,7 @@ func TestAdminBackupsTechnicalDetailsAreCollapsedWithCounts(t *testing.T) {
 	v := removeBackupsView()
 	body := renderBackupsPageForTest(t, v)
 	assertBackupMarkers(t, body, []string{
-		`<details class="tech-details"><summary>Technical details (13 tables included, 8 exclusions)</summary>`,
+		`<details class="tech-details"><summary>Technical details (13 tables included, 9 exclusions)</summary>`,
 	}, []string{`<details class="tech-details" open`})
 	details := body[strings.Index(body, `<details class="tech-details">`):]
 	details = details[:strings.Index(details, "</details>")]

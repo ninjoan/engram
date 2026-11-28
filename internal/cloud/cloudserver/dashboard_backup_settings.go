@@ -19,13 +19,15 @@ import (
 
 // This file implements the dashboard Backups page and its settings routes
 // (cloud backups stage 3): the external destination (an S3-compatible
-// bucket or a Dropbox folder, chosen by the kind form field), the
+// bucket, a Dropbox folder or a Google Drive folder, chosen by the kind form
+// field; Connect with Google lives in dashboard_backup_gdrive.go), the
 // weekday/time schedule, "Back up now" and the run history. Every mutation
 // route is POST only, requires a managed admin (requireManagedAdmin), passes
 // the same-origin check (dashboard_backup_origin.go) and is audited. Form
 // fields are read one by one from the POST body; a request body is never
-// decoded into cloudstore.PutBackupDestinationParams or
-// cloudstore.PutDropboxDestinationParams.
+// decoded into cloudstore.PutBackupDestinationParams,
+// cloudstore.PutDropboxDestinationParams or
+// cloudstore.PutGDriveDestinationParams.
 
 // BackupSettingsStore is the storage boundary of the backup settings.
 // *cloudstore.CloudStore satisfies it; the destination and schedule writes
@@ -34,6 +36,16 @@ type BackupSettingsStore interface {
 	GetBackupDestination(ctx context.Context) (cloudstore.BackupDestination, error)
 	PutBackupDestination(ctx context.Context, params cloudstore.PutBackupDestinationParams, sealer cloudstore.BackupSecretSealer) error
 	PutDropboxDestination(ctx context.Context, params cloudstore.PutDropboxDestinationParams, sealer cloudstore.BackupSecretSealer) error
+	PutGDriveDestination(ctx context.Context, params cloudstore.PutGDriveDestinationParams, sealer cloudstore.BackupSecretSealer) error
+	// SetGDriveRefreshToken stores the refresh token of the Google Drive
+	// destination after Connect with Google, sealed and audited.
+	SetGDriveRefreshToken(ctx context.Context, sealer cloudstore.BackupSecretSealer, refreshToken string, actor cloudstore.BackupDestinationActor) error
+	// CreateBackupOAuthState, ConsumeBackupOAuthState and
+	// CheckBackupOAuthBinding keep the single-use state of a Connect with
+	// Google authorization (cloudstore/backup_oauth.go).
+	CreateBackupOAuthState(ctx context.Context, sealer cloudstore.BackupSecretSealer, principalID, verifier string) (string, error)
+	ConsumeBackupOAuthState(ctx context.Context, opener cloudstore.BackupSecretOpener, state, principalID string) (cloudstore.BackupOAuthGrant, error)
+	CheckBackupOAuthBinding(ctx context.Context, binding string) error
 	ClearBackupDestination(ctx context.Context, actor cloudstore.BackupDestinationActor) error
 	// OpenBackupDestination opens the stored destination of any kind for
 	// "Test connection".
@@ -112,7 +124,7 @@ const (
 	backupReasonAlreadyRunning     = "already_running"
 	backupReasonRunnerError        = "runner_error"
 	// backupReasonUnsupportedKind fails a connection test of a destination
-	// kind the test route cannot check yet (Dropbox, Google Drive).
+	// kind the test route cannot check.
 	backupReasonUnsupportedKind = "unsupported_kind"
 	// backupReasonUnsupportedDestination refuses a manual run of a
 	// destination kind the runner cannot upload to yet.
@@ -127,7 +139,7 @@ const (
 
 // backupStorageKindReason refuses a destination save or check of a kind
 // the dashboard has no form for.
-const backupStorageKindReason = "choose S3-compatible or Dropbox storage"
+const backupStorageKindReason = "choose S3-compatible, Dropbox or Google Drive storage"
 
 // backupNotices maps the notice query parameter to a fixed message, so a
 // crafted URL can only select one of these.
@@ -156,42 +168,16 @@ var backupNotices = map[string]dashboard.BackupsNotice{
 	"run-unsupported":        {Kind: "danger", Message: "This server cannot upload to this kind of destination yet; no backup was started."},
 }
 
-// backupKindNotice describes a stored destination of a kind the dashboard
-// has no form for yet (Google Drive) with its non-secret settings; the OAuth
-// client identifier shows only its last characters. It is empty for an s3
-// or Dropbox destination.
-func backupKindNotice(d cloudstore.BackupDestination) dashboard.BackupsNotice {
-	var title, detail string
-	switch d.Kind {
-	case cloudstore.BackupDestinationKindGDrive:
-		state := "pending authorization"
-		if d.GDrive.Authorized {
-			state = "authorized"
-		}
-		title = "Google Drive destination."
-		detail = "folder " + d.GDrive.FolderName + ", client id " + backupClientIDHint(d.GDrive.ClientID) + ", " + state
-	default:
-		return dashboard.BackupsNotice{}
-	}
-	return dashboard.BackupsNotice{
-		Kind:        "danger",
-		Title:       title,
-		Message:     "Stored destination: " + detail + ". This dashboard cannot edit or test this kind of destination yet; remove it to configure an S3-compatible bucket or a Dropbox folder.",
-		Destination: true,
-	}
-}
-
 // backupKindSummary maps a stored destination onto the fields the status
-// card renders. A Dropbox destination keeps its folder and carries only the
-// app key hint (the full app key is cleared, so the page cannot render it);
-// a Google Drive destination shows its folder in place of the bucket and
-// the client identifier hint in place of the access key id hint.
+// card renders. A Dropbox or Google Drive destination keeps its folder and
+// carries only the hint of its OAuth client identifier (the full app key or
+// client id is cleared, so the page cannot render it).
 func backupKindSummary(d cloudstore.BackupDestination) cloudstore.BackupDestination {
 	switch d.Kind {
 	case cloudstore.BackupDestinationKindDropbox:
 		d.AccessKeyIDHint, d.Dropbox.AppKey = backupClientIDHint(d.Dropbox.AppKey), ""
 	case cloudstore.BackupDestinationKindGDrive:
-		d.Bucket, d.AccessKeyIDHint = d.GDrive.FolderName, backupClientIDHint(d.GDrive.ClientID)
+		d.AccessKeyIDHint, d.GDrive.ClientID = backupClientIDHint(d.GDrive.ClientID), ""
 	}
 	return d
 }
@@ -273,7 +259,7 @@ func (s *CloudServer) handleDashboardBackupsPage(w http.ResponseWriter, r *http.
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	notice := backupNotices[r.URL.Query().Get("notice")]
+	notice := backupNotice(r.URL.Query().Get("notice"))
 	s.renderBackupsPage(w, r, http.StatusOK, notice)
 }
 
@@ -314,11 +300,7 @@ func (s *CloudServer) renderBackupsPageWithDropbox(w http.ResponseWriter, r *htt
 
 // renderBackupsPageView renders view with status and notice.
 func (s *CloudServer) renderBackupsPageView(w http.ResponseWriter, r *http.Request, status int, view dashboard.BackupsPageView, notice dashboard.BackupsNotice) {
-	// A request's own notice wins over the notice describing the stored
-	// destination's kind (backupKindNotice).
-	if notice.Kind != "" || view.Notice.Kind == "" {
-		view.Notice = notice
-	}
+	view.Notice = notice
 	if view.Settings == dashboard.BackupSettingsUnavailable && status == http.StatusOK {
 		status = http.StatusBadGateway
 	}
@@ -333,9 +315,10 @@ func (s *CloudServer) renderBackupsPageView(w http.ResponseWriter, r *http.Reque
 
 func (s *CloudServer) backupsPageView(r *http.Request) dashboard.BackupsPageView {
 	view := dashboard.BackupsPageView{
-		CanManage:  s.canManageManagedUsers(r),
-		Tables:     cloudstore.BackupTables(),
-		Exclusions: cloudstore.BackupExclusions(),
+		CanManage:         s.canManageManagedUsers(r),
+		Tables:            cloudstore.BackupTables(),
+		Exclusions:        cloudstore.BackupExclusions(),
+		GDriveRedirectURI: s.gdriveRedirectURI(),
 	}
 	if kind := r.URL.Query().Get("kind"); dashboard.IsBackupStorageKind(kind) {
 		view.StorageKind, view.StorageKindChosen = kind, true
@@ -359,12 +342,11 @@ func (s *CloudServer) backupsPageView(r *http.Request) dashboard.BackupsPageView
 	}
 	if err != nil {
 		log.Printf("[engram-cloud] backups page: read backup settings: %v", err)
-		return dashboard.BackupsPageView{CanManage: view.CanManage, Tables: view.Tables, Exclusions: view.Exclusions, Settings: dashboard.BackupSettingsUnavailable}
+		return dashboard.BackupsPageView{CanManage: view.CanManage, Tables: view.Tables, Exclusions: view.Exclusions, GDriveRedirectURI: view.GDriveRedirectURI, Settings: dashboard.BackupSettingsUnavailable}
 	}
 	view.Destination = destination
 	if destination.Configured && destination.Kind != cloudstore.BackupDestinationKindS3 {
 		view.Destination = backupKindSummary(destination)
-		view.Notice = backupKindNotice(destination)
 	}
 	view.Now = s.backupClock()
 	view.Settings = dashboard.BackupSettingsKeyMissing
@@ -423,6 +405,9 @@ func (s *CloudServer) handleDashboardSaveBackupDestination(w http.ResponseWriter
 	case "", cloudstore.BackupDestinationKindS3:
 	case cloudstore.BackupDestinationKindDropbox:
 		s.saveDropboxDestination(w, r, actor)
+		return
+	case cloudstore.BackupDestinationKindGDrive:
+		s.saveGDriveDestination(w, r, actor)
 		return
 	default:
 		s.renderBackupsPage(w, r, http.StatusBadRequest, dashboard.BackupsNotice{Kind: "danger", Message: "Destination not saved: " + backupStorageKindReason + ".", Destination: true})
@@ -565,9 +550,10 @@ func backupEchoableEndpoint(endpoint string) string {
 // handleDashboardTestBackupDestination handles POST
 // /dashboard/admin/backups/destination/test: it opens the stored credentials
 // and runs a bounded, read-only access check (S3: list at most one key;
-// Dropbox: refresh a token and read the folder's metadata). The typed result
-// is audited as backup.destination.test and shown after a redirect. A Google
-// Drive destination cannot be tested yet.
+// Dropbox: refresh a token and read the folder's metadata; Google Drive:
+// refresh a token and look the folder up, or report a pending
+// authorization). The typed result is audited as backup.destination.test
+// and shown after a redirect.
 func (s *CloudServer) handleDashboardTestBackupDestination(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.backupSettingsActor(w, r, true)
 	if !ok {
@@ -600,6 +586,11 @@ func (s *CloudServer) handleDashboardTestBackupDestination(w http.ResponseWriter
 		result, reason = classifyDropboxConnectionTest(s.runDropboxCheck(r.Context(), dest.Dropbox))
 		notice = "dropbox-test-" + result
 		metadata = dropboxAuditMetadata(dest.Dropbox, result)
+	case dest.Kind == cloudstore.BackupDestinationKindGDrive:
+		var result string
+		result, reason = s.testGDriveDestination(r.Context(), dest.GDrive)
+		notice = "gdrive-test-" + result
+		metadata = gdriveAuditMetadata(dest.GDrive.ClientID, dest.GDrive.FolderName, result)
 	case dest.Kind != cloudstore.BackupDestinationKindS3:
 		notice, reason = "test-unsupported", backupReasonUnsupportedKind
 	default:
@@ -653,6 +644,9 @@ func (s *CloudServer) handleDashboardCheckBackupDestination(w http.ResponseWrite
 	case "", cloudstore.BackupDestinationKindS3:
 	case cloudstore.BackupDestinationKindDropbox:
 		s.checkDropboxDestination(w, r, actor, store)
+		return
+	case cloudstore.BackupDestinationKindGDrive:
+		s.refuseGDriveCheck(w, r, actor)
 		return
 	default:
 		s.renderBackupsPage(w, r, http.StatusBadRequest, dashboard.BackupsNotice{Kind: "danger", Message: "Destination not checked: " + backupStorageKindReason + ".", Destination: true})

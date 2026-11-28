@@ -29,8 +29,8 @@ import (
 
 // restoredTables is the independent expectation of every table a backup
 // restores verbatim; cloud_principal_tokens, cloud_backup_destinations,
-// cloud_backup_schedule and cloud_backup_runs must never be exported or
-// restored.
+// cloud_backup_schedule, cloud_backup_runs and cloud_backup_oauth_states
+// must never be exported or restored.
 var restoredTables = []string{
 	"cloud_users", "cloud_principals", "cloud_human_users", "cloud_project_grants",
 	"cloud_project_controls", "cloud_auth_audit_log", "cloud_sync_audit_log",
@@ -38,7 +38,7 @@ var restoredTables = []string{
 	"cloud_chunks", "cloud_project_sessions", "cloud_mutations",
 }
 
-var allCloudTables = append(append([]string{}, restoredTables...), "cloud_principal_tokens", "cloud_backup_destinations", "cloud_backup_schedule", "cloud_backup_runs")
+var allCloudTables = append(append([]string{}, restoredTables...), "cloud_principal_tokens", "cloud_backup_destinations", "cloud_backup_schedule", "cloud_backup_runs", "cloud_backup_oauth_states")
 
 var schemaCounter atomic.Int64
 
@@ -523,9 +523,42 @@ func TestExportArchiveExcludesCredentialsAndPutsManifestLast(t *testing.T) {
 		}
 		excluded[entry.Table+"."+entry.Column] = true
 	}
-	for _, want := range []string{"cloud_principal_tokens.", "cloud_users.password_hash", "receipt_audit.*.", "cloud_backup_destinations.", "cloud_backup_schedule.", "cloud_backup_runs."} {
+	for _, want := range []string{"cloud_principal_tokens.", "cloud_users.password_hash", "receipt_audit.*.", "cloud_backup_destinations.", "cloud_backup_schedule.", "cloud_backup_runs.", "cloud_backup_oauth_states."} {
 		if !excluded[want] {
 			t.Errorf("manifest exclusions %+v miss %q", manifest.Excluded, want)
+		}
+	}
+}
+
+// S15/S9: a pending "Connect with Google" authorization (its state hash
+// and sealed PKCE verifier) never reaches an archive.
+func TestExportArchiveExcludesPendingGoogleAuthorizations(t *testing.T) {
+	ctx := context.Background()
+	source := openIsolatedStore(t)
+	seedSource(t, source)
+	key, err := backupcrypto.ParseKey(hex.EncodeToString(bytes.Repeat([]byte{9}, backupcrypto.KeySize)))
+	must(t, err)
+	sealer, err := backupcrypto.NewSealer(key)
+	must(t, err)
+	admin, err := source.cs.CreateHumanUser(ctx, cloudstore.CreateHumanUserParams{Username: "oauth-admin", Email: "oauth-admin@example.test", DisplayName: "OAuth Admin", Role: cloudstore.PrincipalRoleAdmin})
+	must(t, err)
+	must(t, source.cs.PutGDriveDestination(ctx, cloudstore.PutGDriveDestinationParams{
+		ClientID: "archive-excluded.apps.googleusercontent.com", FolderName: "Engram backups", ClientSecret: "archive-excluded-gdrive-client-secret",
+		Actor: cloudstore.BackupDestinationActor{Source: "test"},
+	}, sealer))
+	const verifier = "archive-excluded-pkce-verifier-0123456789abcdefghij"
+	state, err := source.cs.CreateBackupOAuthState(ctx, sealer, admin.PrincipalID, verifier)
+	must(t, err)
+	var hash, binding, sealed string
+	must(t, source.db.QueryRow(`SELECT state_hash, destination_binding, verifier_ciphertext FROM cloud_backup_oauth_states`).Scan(&hash, &binding, &sealed))
+	archive, _ := exportArchive(t, source)
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	must(t, err)
+	raw, err := io.ReadAll(gz)
+	must(t, err)
+	for _, value := range []string{state, hash, binding, sealed, verifier, "cloud_backup_oauth_states.jsonl", "archive-excluded-gdrive-client-secret"} {
+		if bytes.Contains(raw, []byte(value)) {
+			t.Errorf("archive contains %q", value)
 		}
 	}
 }

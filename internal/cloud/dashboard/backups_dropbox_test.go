@@ -134,29 +134,6 @@ func TestAdminBackupsDropboxFormForANewDestination(t *testing.T) {
 	}
 }
 
-// Google Drive is offered but renders only text: no fake controls.
-func TestAdminBackupsGoogleDriveChoiceIsPlainText(t *testing.T) {
-	v := readyBackupsView(cloudstore.BackupDestination{})
-	v.StorageKind = cloudstore.BackupDestinationKindGDrive
-	body := renderBackupsPageForTest(t, v)
-	start := strings.Index(body, `<div class="backup-coming" role="note">`)
-	if start < 0 {
-		t.Fatalf("no Google Drive note, body=%q", body)
-	}
-	note := body[start : start+strings.Index(body[start:], "</div>")]
-	if !strings.Contains(note, "Google Drive is coming next") {
-		t.Fatalf("note = %q", note)
-	}
-	for _, forbidden := range []string{"<input", "<button", "<select", "disabled"} {
-		if strings.Contains(note, forbidden) {
-			t.Fatalf("the Google Drive note renders a control %q: %q", forbidden, note)
-		}
-	}
-	if strings.Contains(body, `action="/dashboard/admin/backups/destination"`) || strings.Contains(body, backupWizardScript) {
-		t.Fatalf("the Google Drive choice must render no destination form, body=%q", body)
-	}
-}
-
 // A refused Dropbox save re-renders the app key and the folder, marks the
 // failing field and never echoes a secret.
 func TestAdminBackupsDropboxFormRerendersARefusedSave(t *testing.T) {

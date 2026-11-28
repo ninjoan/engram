@@ -9,9 +9,8 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 )
 
-// A stored Dropbox destination renders its own status card; until the
-// dashboard has a Google Drive form, a Google Drive destination renders the
-// status card with its kind and its non-secret settings, never a 500.
+// A stored Dropbox or Google Drive destination renders its own status card
+// with its kind and its non-secret settings, never a 500.
 func TestDashboardBackupsPageRendersNonS3DestinationKinds(t *testing.T) {
 	for name, tc := range map[string]struct {
 		destination cloudstore.BackupDestination
@@ -23,11 +22,11 @@ func TestDashboardBackupsPageRendersNonS3DestinationKinds(t *testing.T) {
 		},
 		"gdrive pending": {
 			destination: cloudstore.BackupDestination{Configured: true, Kind: cloudstore.BackupDestinationKindGDrive, GDrive: cloudstore.GDriveDestinationView{ClientID: "1234-abcd.apps.googleusercontent.com", FolderName: "Engram backups"}},
-			want:        []string{"Google Drive destination", "Engram backups", "****.com", "pending authorization"},
+			want:        []string{"Google Drive <span", "Engram backups", "****.com", "<dd>Pending</dd>"},
 		},
 		"gdrive authorized": {
 			destination: cloudstore.BackupDestination{Configured: true, Kind: cloudstore.BackupDestinationKindGDrive, GDrive: cloudstore.GDriveDestinationView{ClientID: "1234-abcd.apps.googleusercontent.com", FolderName: "Engram backups", Authorized: true}},
-			want:        []string{"Google Drive destination", "Engram backups", "authorized"},
+			want:        []string{"Google Drive <span", "Engram backups", "<dd>Connected</dd>"},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -49,10 +48,10 @@ func TestDashboardBackupsPageRendersNonS3DestinationKinds(t *testing.T) {
 			if strings.Contains(body, "1234-abcd.apps.googleusercontent.com") || strings.Contains(body, "dbxappkey7q4zexample") {
 				t.Fatalf("page shows the full client identifier: %q", body)
 			}
-			if strings.Contains(body, "pending authorization") != strings.HasSuffix(name, "pending") {
+			if strings.Contains(body, "<dd>Pending</dd>") != strings.HasSuffix(name, "pending") {
 				t.Fatalf("pending marker mismatch for %s", name)
 			}
-			// A notice from the query string still wins over the kind notice.
+			// A notice from the query string renders on the card.
 			page := performDashboardRequest(f.srv, http.MethodGet, backupsPagePath+"?notice=schedule-saved", f.cookie).Body.String()
 			if !strings.Contains(page, "Backup schedule saved.") {
 				t.Fatalf("query notice lost, body=%q", page)

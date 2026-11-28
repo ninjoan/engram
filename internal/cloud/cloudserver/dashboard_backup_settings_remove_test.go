@@ -23,7 +23,7 @@ func TestDashboardBackupsPageRemoveControlIsOnTheStatusCardOnly(t *testing.T) {
 	for _, marker := range []string{
 		`<summary class="backup-remove-toggle">Remove destination</summary>`,
 		`<button type="submit" class="backup-danger-fill">Yes, remove destination</button>`,
-		"<details class=\"tech-details\"><summary>Technical details (13 tables included, 8 exclusions)</summary>",
+		"<details class=\"tech-details\"><summary>Technical details (13 tables included, 9 exclusions)</summary>",
 		"<strong>Memories and sessions of every project</strong>",
 	} {
 		if !strings.Contains(body, marker) {

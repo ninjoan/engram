@@ -39,6 +39,10 @@ const (
 	authAuditActionBackupRunManual       = "backup.run.manual"
 	// backup.destination.check is a test of submitted, unsaved fields.
 	authAuditActionBackupDestinationCheck = "backup.destination.check"
+	// backup.destination.authorize_start records a "Connect with Google"
+	// redirect; a successful backup.destination.authorize is recorded by
+	// cloudstore with the refresh token, a failed code exchange here.
+	authAuditActionBackupDestinationAuthorizeStart = "backup.destination.authorize_start"
 )
 
 // AdminIdentityStore is the storage boundary used by cloudserver admin API

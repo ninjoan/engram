@@ -1018,6 +1018,20 @@ func (cs *CloudStore) migrateSchema(ctx context.Context) error {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS cloud_backup_runs_scheduled_uidx ON cloud_backup_runs (scheduled_for) WHERE trigger = 'scheduled'`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_backup_runs_started_at ON cloud_backup_runs (started_at DESC, id DESC)`,
+		// cloud_backup_oauth_states: pending "Connect with Google"
+		// authorizations (see backup_oauth.go). Only the SHA-256 of a state is
+		// stored; the PKCE verifier is sealed with ENGRAM_CLOUD_BACKUP_KEY.
+		// Rows are single use and short lived; never exported in a backup.
+		`CREATE TABLE IF NOT EXISTS cloud_backup_oauth_states (
+			state_hash TEXT PRIMARY KEY CHECK (state_hash ~ '^[0-9a-f]{64}$'),
+			principal_id BIGINT NOT NULL REFERENCES cloud_principals(id) ON DELETE CASCADE,
+			destination_binding TEXT NOT NULL CHECK (destination_binding <> ''),
+			verifier_ciphertext TEXT NOT NULL CHECK (verifier_ciphertext <> ''),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMPTZ NOT NULL,
+			CHECK (expires_at > created_at)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cloud_backup_oauth_states_principal ON cloud_backup_oauth_states (principal_id, created_at DESC)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {

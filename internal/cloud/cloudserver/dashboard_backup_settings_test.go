@@ -2,6 +2,8 @@ package cloudserver
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -60,6 +62,16 @@ type fakeBackupSettingsStore struct {
 	putDropbox    []cloudstore.PutDropboxDestinationParams
 	putDropboxErr error
 
+	// Google Drive settings and "Connect with Google" states.
+	putGDrive    []cloudstore.PutGDriveDestinationParams
+	gdriveTokens []fakeGDriveToken
+	setTokenErr  error
+	oauthStates  map[string]fakeOAuthState
+	oauthCreates int
+	oauthUsed    int
+	// bindingVersion moves on every destination write, like updated_at.
+	bindingVersion int
+
 	putDestination    []cloudstore.PutBackupDestinationParams
 	putSealers        []cloudstore.BackupSecretSealer
 	putDestinationErr error
@@ -87,6 +99,7 @@ func (f *fakeBackupSettingsStore) PutBackupDestination(_ context.Context, params
 		return fmt.Errorf("%w: access key id must be 1-128 printable characters without spaces", cloudstore.ErrInvalidBackupDestination)
 	}
 	f.destination = cloudstore.BackupDestination{Configured: true, Kind: "s3", Endpoint: params.Endpoint, Region: params.Region, Bucket: params.Bucket, Prefix: params.Prefix, AccessKeyIDHint: "****" + params.AccessKeyID[len(params.AccessKeyID)-4:]}
+	f.bindingVersion++
 	return nil
 }
 
@@ -95,6 +108,7 @@ func (f *fakeBackupSettingsStore) ClearBackupDestination(_ context.Context, acto
 	defer f.mu.Unlock()
 	f.clears = append(f.clears, actor)
 	f.destination = cloudstore.BackupDestination{}
+	f.bindingVersion++
 	return nil
 }
 
@@ -190,7 +204,127 @@ func (f *fakeBackupSettingsStore) LatestBackupRunOutcomes(context.Context) (clou
 func (f *fakeBackupSettingsStore) mutations() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.putDestination) + len(f.putDropbox) + len(f.clears) + f.opens + len(f.putSchedule)
+	return len(f.putDestination) + len(f.putDropbox) + len(f.clears) + f.opens + len(f.putSchedule) +
+		len(f.putGDrive) + len(f.gdriveTokens) + f.oauthCreates + f.oauthUsed
+}
+
+// fakeGDriveToken is one SetGDriveRefreshToken call.
+type fakeGDriveToken struct {
+	token  string
+	sealer cloudstore.BackupSecretSealer
+	actor  cloudstore.BackupDestinationActor
+}
+
+// fakeOAuthState is a pending "Connect with Google" state.
+type fakeOAuthState struct {
+	principal, verifier, binding string
+	expired                      bool
+}
+
+// PutGDriveDestination validates like the real store; the destination is
+// pending authorization.
+func (f *fakeBackupSettingsStore) PutGDriveDestination(_ context.Context, params cloudstore.PutGDriveDestinationParams, sealer cloudstore.BackupSecretSealer) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.putGDrive = append(f.putGDrive, params)
+	f.putSealers = append(f.putSealers, sealer)
+	creds, err := cloudstore.ValidateGDriveDestination(params)
+	if err != nil {
+		return err
+	}
+	f.destination = cloudstore.BackupDestination{Configured: true, Kind: cloudstore.BackupDestinationKindGDrive, GDrive: cloudstore.GDriveDestinationView{ClientID: creds.ClientID, FolderName: creds.FolderName}}
+	f.gdriveCreds = creds
+	f.bindingVersion++
+	return nil
+}
+
+// SetGDriveRefreshToken authorizes the stored Google Drive destination.
+func (f *fakeBackupSettingsStore) SetGDriveRefreshToken(_ context.Context, sealer cloudstore.BackupSecretSealer, token string, actor cloudstore.BackupDestinationActor) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.setTokenErr != nil {
+		return f.setTokenErr
+	}
+	if !f.destination.Configured {
+		return cloudstore.ErrBackupDestinationNotConfigured
+	}
+	if f.destination.Kind != cloudstore.BackupDestinationKindGDrive {
+		return cloudstore.ErrBackupDestinationKindMismatch
+	}
+	f.gdriveTokens = append(f.gdriveTokens, fakeGDriveToken{token: token, sealer: sealer, actor: actor})
+	f.destination.GDrive.Authorized = true
+	f.gdriveCreds.RefreshToken = token
+	f.bindingVersion++
+	return nil
+}
+
+func (f *fakeBackupSettingsStore) currentBinding() (string, error) {
+	if !f.destination.Configured {
+		return "", cloudstore.ErrBackupDestinationNotConfigured
+	}
+	if f.destination.Kind != cloudstore.BackupDestinationKindGDrive {
+		return "", cloudstore.ErrBackupDestinationKindMismatch
+	}
+	return fmt.Sprintf("binding-%d", f.bindingVersion), nil
+}
+
+// CreateBackupOAuthState stores a state like the real store: a 43
+// character base64url value bound to the principal and the destination.
+func (f *fakeBackupSettingsStore) CreateBackupOAuthState(_ context.Context, sealer cloudstore.BackupSecretSealer, principalID, verifier string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if sealer == nil {
+		return "", cloudstore.ErrBackupDestinationKeyRequired
+	}
+	binding, err := f.currentBinding()
+	if err != nil {
+		return "", err
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	state := base64.RawURLEncoding.EncodeToString(raw)
+	if f.oauthStates == nil {
+		f.oauthStates = map[string]fakeOAuthState{}
+	}
+	f.oauthStates[state] = fakeOAuthState{principal: principalID, verifier: verifier, binding: binding}
+	f.oauthCreates++
+	return state, nil
+}
+
+// ConsumeBackupOAuthState refuses like the real store and consumes a valid
+// state once; a refusal leaves the state as it was.
+func (f *fakeBackupSettingsStore) ConsumeBackupOAuthState(_ context.Context, opener cloudstore.BackupSecretOpener, state, principalID string) (cloudstore.BackupOAuthGrant, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if opener == nil {
+		return cloudstore.BackupOAuthGrant{}, cloudstore.ErrBackupDestinationKeyRequired
+	}
+	pending, ok := f.oauthStates[state]
+	switch {
+	case !ok:
+		return cloudstore.BackupOAuthGrant{}, cloudstore.ErrBackupOAuthStateNotFound
+	case pending.expired:
+		return cloudstore.BackupOAuthGrant{}, cloudstore.ErrBackupOAuthStateExpired
+	case pending.principal != principalID:
+		return cloudstore.BackupOAuthGrant{}, cloudstore.ErrBackupOAuthStatePrincipal
+	}
+	if current, err := f.currentBinding(); err != nil || current != pending.binding {
+		return cloudstore.BackupOAuthGrant{}, cloudstore.ErrBackupOAuthDestinationChanged
+	}
+	delete(f.oauthStates, state)
+	f.oauthUsed++
+	return cloudstore.BackupOAuthGrant{Verifier: pending.verifier, Binding: pending.binding}, nil
+}
+
+func (f *fakeBackupSettingsStore) CheckBackupOAuthBinding(_ context.Context, binding string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if current, err := f.currentBinding(); err != nil || current != binding {
+		return cloudstore.ErrBackupOAuthDestinationChanged
+	}
+	return nil
 }
 
 type fakeBackupRunner struct {
@@ -272,6 +406,8 @@ type backupSettingsFixture struct {
 	runner   *fakeBackupRunner
 	checker  *fakeBackupChecker
 	dropbox  *fakeDropboxChecker
+	gdrive   *fakeGDriveChecker
+	google   *fakeGoogle
 	exporter *fakeBackupExporter
 	cookie   *http.Cookie
 }
@@ -280,11 +416,14 @@ type backupSettingsFixture struct {
 // the dashboard session helpers.
 func wireBackupFixture(t *testing.T, srv *CloudServer, audit *loginAuditTestStore, cookie *http.Cookie, settings *fakeBackupSettingsStore) backupSettingsFixture {
 	t.Helper()
-	f := backupSettingsFixture{srv: srv, audit: audit, settings: settings, runner: &fakeBackupRunner{}, checker: &fakeBackupChecker{}, dropbox: &fakeDropboxChecker{}, exporter: &fakeBackupExporter{write: []byte("archive-bytes")}, cookie: cookie}
+	f := backupSettingsFixture{srv: srv, audit: audit, settings: settings, runner: &fakeBackupRunner{}, checker: &fakeBackupChecker{}, dropbox: &fakeDropboxChecker{}, gdrive: &fakeGDriveChecker{}, google: newFakeGoogle(), exporter: &fakeBackupExporter{write: []byte("archive-bytes")}, cookie: cookie}
 	WithBackupSettings(settings, testBackupKey(t))(srv)
 	WithBackupRunner(f.runner)(srv)
 	srv.backupCheckAccess = f.checker.check
 	srv.backupCheckDropbox = f.dropbox.check
+	srv.backupCheckGDrive = f.gdrive.check
+	srv.backupGDriveHTTPClient = &http.Client{Transport: f.google}
+	WithPublicURL(testPublicURL)(srv)
 	srv.backupExport = f.exporter.export
 	srv.backupNow = func() time.Time { return time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC) }
 	return f

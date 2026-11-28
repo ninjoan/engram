@@ -1,6 +1,9 @@
 package cloud
 
 import (
+	"errors"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -37,6 +40,67 @@ type Config struct {
 	// Callers that use backup destinations must fail loudly on it rather
 	// than treating the feature as disabled. It never contains the key.
 	BackupKeyError error
+	// PublicURL is the dashboard's public origin (ENGRAM_CLOUD_PUBLIC_URL),
+	// normalized to scheme://host[:port]: https, or http only for a loopback
+	// host. It is the base of the Google Drive OAuth redirect URI, which is
+	// never derived from request headers. Empty means unset: the dashboard
+	// cannot offer "Connect with Google".
+	PublicURL string
+	// PublicURLError reports a set but invalid ENGRAM_CLOUD_PUBLIC_URL.
+	// cloud serve refuses to start on it rather than dropping the value.
+	PublicURLError error
+}
+
+// ErrInvalidPublicURL is the PublicURLError of an unusable
+// ENGRAM_CLOUD_PUBLIC_URL.
+var ErrInvalidPublicURL = errors.New("ENGRAM_CLOUD_PUBLIC_URL must be the dashboard's public origin, such as https://engram.example.com: https (http only for localhost or a loopback IP), no path, query, fragment or user info")
+
+// ParsePublicURL validates a public origin and normalizes it to
+// scheme://host[:port] with a lowercase scheme and host. Errors wrap
+// ErrInvalidPublicURL and never echo the value.
+func ParsePublicURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.Opaque != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") ||
+		(u.Path != "" && u.Path != "/") || u.Hostname() == "" {
+		return "", ErrInvalidPublicURL
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if strings.ContainsAny(host, " \t%") {
+		return "", ErrInvalidPublicURL
+	}
+	switch scheme {
+	case "https":
+	case "http":
+		if !isLoopbackHost(host) {
+			return "", ErrInvalidPublicURL
+		}
+	default:
+		return "", ErrInvalidPublicURL
+	}
+	hostport := host
+	if strings.Contains(host, ":") {
+		hostport = "[" + host + "]"
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", ErrInvalidPublicURL
+		}
+		hostport += ":" + port
+	} else if strings.HasSuffix(u.Host, ":") {
+		return "", ErrInvalidPublicURL
+	}
+	return scheme + "://" + hostport, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 const DefaultJWTSecret = "engram-dev-jwt-secret-for-local-smoke-1234"
@@ -63,6 +127,9 @@ func ConfigFromEnv() Config {
 	cfg.StartupReceiptDir = strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_STARTUP_RECEIPT_DIR"))
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_BACKUP_KEY")); v != "" {
 		cfg.BackupKey, cfg.BackupKeyError = backupcrypto.ParseKey(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_PUBLIC_URL")); v != "" {
+		cfg.PublicURL, cfg.PublicURLError = ParsePublicURL(v)
 	}
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_DATABASE_URL")); v != "" {
 		cfg.DSN = v

@@ -91,6 +91,23 @@ type BackupDropboxForm struct {
 	Error string
 }
 
+// BackupGDriveForm is the Google Drive destination form as the admin
+// submitted it, re-rendered after a refused save or check. It never holds the
+// client secret, which always renders empty.
+type BackupGDriveForm struct {
+	// Submitted is true when the form re-renders submitted values;
+	// otherwise the folder is pre-filled from the stored Google Drive
+	// destination or the default folder, and the client id starts empty.
+	Submitted  bool
+	ClientID   string
+	FolderName string
+	// Field names the form field the error is about (client_id,
+	// client_secret or folder); empty when the error names none.
+	Field string
+	// Error is the fixed validation reason; it never echoes a value.
+	Error string
+}
+
 // BackupDestinationCheck is the typed result of checking a destination
 // before saving it (POST /dashboard/admin/backups/destination/check). It
 // never holds a credential or a provider's answer.
@@ -148,6 +165,12 @@ type BackupsPageView struct {
 	StorageKindChosen bool
 	// DropboxForm re-renders a refused or checked Dropbox save.
 	DropboxForm BackupDropboxForm
+	// GDriveForm re-renders a refused Google Drive save or check.
+	GDriveForm BackupGDriveForm
+	// GDriveRedirectURI is the Google OAuth redirect URI built from
+	// ENGRAM_CLOUD_PUBLIC_URL; empty when it is not set, and then no
+	// Connect with Google control renders.
+	GDriveRedirectURI string
 	// Now is the time relative times are measured from; zero uses the
 	// wall clock.
 	Now time.Time
@@ -504,7 +527,7 @@ func backupFieldAttrs(invalid bool, id string, hint bool) templ.Attributes {
 // when it re-renders a refused save or check, or when the admin chose a
 // storage kind.
 func (v BackupsPageView) destinationFormOpen() bool {
-	return v.DestinationForm.Submitted || v.DropboxForm.Submitted || v.StorageKindChosen
+	return v.DestinationForm.Submitted || v.DropboxForm.Submitted || v.GDriveForm.Submitted || v.StorageKindChosen
 }
 
 // backupStorageOption is one option of the storage select.
@@ -608,6 +631,75 @@ func backupDropboxFolderPrefix(folder string) string {
 	return strings.TrimRight(strings.TrimSpace(folder), "/") + "/"
 }
 
+// isGDriveDestination is true for a stored Google Drive destination, which
+// the status card describes by its folder, masked client id and
+// authorization.
+func (v BackupsPageView) isGDriveDestination() bool {
+	return v.Destination.Configured && v.Destination.Kind == cloudstore.BackupDestinationKindGDrive
+}
+
+// gdrivePending is true for a stored Google Drive destination whose
+// Connect with Google authorization has not completed.
+func (v BackupsPageView) gdrivePending() bool {
+	return v.isGDriveDestination() && !v.Destination.GDrive.Authorized
+}
+
+// gdriveConnectVisible renders Connect with Google: a managed admin with the
+// backup key, a stored Google Drive destination and ENGRAM_CLOUD_PUBLIC_URL.
+func (v BackupsPageView) gdriveConnectVisible() bool {
+	return v.settingsFormsVisible() && v.isGDriveDestination() && v.GDriveRedirectURI != ""
+}
+
+// gdriveFormValue is the value a non-secret Google Drive field renders: the
+// submitted value, else the stored folder (the client id starts empty),
+// else the default folder. The client secret always renders empty.
+func (v BackupsPageView) gdriveFormValue(field string) string {
+	form := v.GDriveForm
+	switch {
+	case form.Submitted && field == "client_id":
+		return form.ClientID
+	case form.Submitted && field == "folder":
+		return form.FolderName
+	case field == "folder" && v.isGDriveDestination():
+		return v.Destination.GDrive.FolderName
+	case field == "folder":
+		return cloudstore.DefaultGDriveFolderName
+	}
+	return ""
+}
+
+func (v BackupsPageView) gdriveFieldError(field string) string {
+	if v.GDriveForm.Submitted && v.GDriveForm.Field == field {
+		return v.GDriveForm.Error
+	}
+	return ""
+}
+
+func (v BackupsPageView) gdriveFieldAttrs(field, id string, hint bool) templ.Attributes {
+	return backupFieldAttrs(v.gdriveFieldError(field) != "", id, hint)
+}
+
+// gdriveSaveRefused is true when the Google Drive form re-renders a refused
+// save.
+func (v BackupsPageView) gdriveSaveRefused() bool {
+	return v.GDriveForm.Submitted && v.GDriveForm.Error != ""
+}
+
+// gdriveErrorUnplaced is the reason no Google Drive field shows.
+func (v BackupsPageView) gdriveErrorUnplaced() string {
+	switch v.GDriveForm.Field {
+	case "client_id", "client_secret", "folder":
+		return ""
+	}
+	return v.GDriveForm.Error
+}
+
+// backupGDriveFolderPrefix renders a Google Drive folder name as the start
+// of a file path.
+func backupGDriveFolderPrefix(folder string) string {
+	return strings.TrimSpace(folder) + "/"
+}
+
 // backupDropboxAuthorizeURL is the authorization URL pattern of the
 // offline (refresh token) code flow; APP_KEY is replaced by the admin.
 const backupDropboxAuthorizeURL = "https://www.dropbox.com/oauth2/authorize?client_id=APP_KEY&response_type=code&token_access_type=offline"
@@ -621,8 +713,11 @@ const backupDropboxTokenExchange = `curl https://api.dropboxapi.com/oauth2/token
 
 // setupReadyNote says what to have at hand for the chosen storage kind.
 func (v BackupsPageView) setupReadyNote() string {
-	if v.storageKind() == cloudstore.BackupDestinationKindDropbox {
+	switch v.storageKind() {
+	case cloudstore.BackupDestinationKindDropbox:
 		return "have your Dropbox app key, app secret and refresh token ready."
+	case cloudstore.BackupDestinationKindGDrive:
+		return "have your Google OAuth client id and client secret ready; Connect with Google follows the save."
 	}
 	return "have your bucket name and an access key pair ready."
 }
@@ -630,6 +725,9 @@ func (v BackupsPageView) setupReadyNote() string {
 // untestedNote is the status line of a destination not tested since it was
 // saved.
 func (v BackupsPageView) untestedNote() string {
+	if v.isGDriveDestination() {
+		return "Not tested since it was connected; the next backup is the first check that the authorization reaches the Google Drive folder."
+	}
 	if v.isDropboxDestination() {
 		return "Not tested since it was saved; the next backup is the first check that the saved credentials reach the Dropbox folder."
 	}
@@ -638,6 +736,9 @@ func (v BackupsPageView) untestedNote() string {
 
 // testedNote ends the status line of a passed test.
 func (v BackupsPageView) testedNote() string {
+	if v.isGDriveDestination() {
+		return " · Google Drive accepted the saved authorization."
+	}
 	if v.isDropboxDestination() {
 		return " · Dropbox accepted the saved credentials."
 	}
@@ -688,21 +789,35 @@ var backupDropboxTestFailures = map[string]backupDestinationStatus{
 	"unexpected_response": {Title: "Unexpected response.", Detail: "Dropbox answered in a way Engram does not recognize. Test again later."},
 }
 
-// destinationStatus is Locked without ENGRAM_CLOUD_BACKUP_KEY, Not tested
-// when no test was recorded since the last save, else Connected or Failing
-// from the newest test.
+// backupGDriveTestFailures are the Google Drive texts of backupTestFailures.
+var backupGDriveTestFailures = map[string]backupDestinationStatus{
+	"auth_failed":         {Title: "Authorization rejected.", Detail: "Google refused the saved authorization: it was revoked, it expired (apps left in Testing lose it after 7 days) or it is not limited to drive.file. Press Reconnect with Google."},
+	"network":             {Title: "Google Drive unreachable.", Detail: "Network error or no answer within 15 s. Check DNS and the firewall from this server, then test again."},
+	"key_mismatch":        {Title: "Saved settings cannot be opened.", Detail: "ENGRAM_CLOUD_BACKUP_KEY changed since they were saved. Save the Google Drive settings again and connect."},
+	"unexpected_response": {Title: "Unexpected response.", Detail: "Google Drive answered in a way Engram does not recognize. Test again later."},
+}
+
+// destinationStatus is Locked without ENGRAM_CLOUD_BACKUP_KEY, Not
+// connected for a Google Drive destination awaiting its authorization, Not
+// tested when no test was recorded since the last save, else Connected or
+// Failing from the newest test.
 func (v BackupsPageView) destinationStatus() backupDestinationStatus {
 	switch {
 	case v.Settings == BackupSettingsKeyMissing:
 		return backupDestinationStatus{Class: "is-locked", Label: "Locked"}
+	case v.gdrivePending():
+		return backupDestinationStatus{Class: "is-untested", Label: "Not connected"}
 	case !v.DestinationTest.Tested():
 		return backupDestinationStatus{Class: "is-untested", Label: "Not tested"}
 	case v.DestinationTest.Succeeded:
 		return backupDestinationStatus{Class: "is-connected", Label: "Connected"}
 	}
 	failures := backupTestFailures
-	if v.isDropboxDestination() {
+	switch {
+	case v.isDropboxDestination():
 		failures = backupDropboxTestFailures
+	case v.isGDriveDestination():
+		failures = backupGDriveTestFailures
 	}
 	status, ok := failures[v.DestinationTest.ReasonCode]
 	if !ok {
@@ -942,11 +1057,12 @@ var backupTableGroups = map[string]string{
 // backupExclusionGroups maps every cloudstore.BackupExclusions() entry, by
 // backupExclusionKey, to its never-included group.
 var backupExclusionGroups = map[string]string{
-	"cloud_principal_tokens":    "credentials",
-	"cloud_users.password_hash": "credentials",
-	"cloud_backup_destinations": "backup-settings",
-	"cloud_backup_schedule":     "backup-settings",
-	"cloud_backup_runs":         "backup-settings",
+	"cloud_principal_tokens":                                     "credentials",
+	"cloud_users.password_hash":                                  "credentials",
+	"cloud_backup_destinations":                                  "backup-settings",
+	"cloud_backup_schedule":                                      "backup-settings",
+	"cloud_backup_runs":                                          "backup-settings",
+	"cloud_backup_oauth_states":                                  "backup-settings",
 	"cloud_chunks.user_id,imported_at,sessions,memories,prompts": "internal",
 	"cloud_mutations.user_id":                                    "internal",
 	"receipt_audit.*":                                            "internal",

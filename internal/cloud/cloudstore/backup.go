@@ -70,9 +70,9 @@ var backupTableSpecs = []backupTableSpec{
 
 // backupGuardedTables must be empty in a restore target in addition to every
 // backup table; they are never restored. A configured backup destination,
-// schedule or run history means the target is already in use, so it is
-// refused like any other row.
-var backupGuardedTables = []string{"cloud_principal_tokens", backupDestinationsTable, backupScheduleTable, backupRunsTable}
+// schedule, run history or pending Google authorization means the target is
+// already in use, so it is refused like any other row.
+var backupGuardedTables = []string{"cloud_principal_tokens", backupDestinationsTable, backupScheduleTable, backupRunsTable, backupOAuthStatesTable}
 
 // BackupExclusion documents data a backup deliberately does not carry.
 type BackupExclusion struct {
@@ -92,6 +92,7 @@ func BackupExclusions() []BackupExclusion {
 		{Table: backupDestinationsTable, Reason: "backup destination credentials sealed with ENGRAM_CLOUD_BACKUP_KEY; reconfigure the destination after restore"},
 		{Table: backupScheduleTable, Reason: "backup schedule of the source server; it depends on the excluded destination, so reconfigure it after restore"},
 		{Table: backupRunsTable, Reason: "backup run history of the source server; operational state, not restored"},
+		{Table: backupOAuthStatesTable, Reason: "pending Google Drive authorizations of the source server; short-lived and single use, never restored"},
 	}
 }
 

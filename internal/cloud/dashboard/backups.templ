@@ -118,7 +118,7 @@ templ backupEnvVarList(names []string) {
 // backupScheduledSection renders the destination, schedule, "Back up now"
 // and run history according to the settings state.
 templ backupScheduledSection(v BackupsPageView) {
-	<p class="backup-lead">Engram uploads the same archive to one destination, an S3-compatible bucket or a Dropbox folder, on the weekdays and time you choose. Engram never deletes uploaded backups: set expiration with the bucket's lifecycle rules, or clean up the Dropbox folder yourself.</p>
+	<p class="backup-lead">Engram uploads the same archive to one destination, an S3-compatible bucket, a Dropbox folder or a Google Drive folder, on the weekdays and time you choose. Engram never deletes uploaded backups: set expiration with the bucket's lifecycle rules, or clean up the Dropbox or Google Drive folder yourself.</p>
 	switch v.Settings {
 		case BackupSettingsNotWired:
 			@EmptyState("Not Available", "This server has no backup settings store. Download a backup above or run engram cloud backup export on the server.")
@@ -149,7 +149,9 @@ templ backupScheduledSection(v BackupsPageView) {
 templ backupDestinationBlock(v BackupsPageView) {
 	<section class="data-frame backup-destination" aria-labelledby="backup-destination-title">
 		<p class="section-kicker" id="backup-destination-title">DESTINATION</p>
-		if v.isDropboxDestination() {
+		if v.isGDriveDestination() {
+			@backupGDriveSummary(v)
+		} else if v.isDropboxDestination() {
 			@backupDropboxSummary(v)
 		} else if v.Destination.Configured {
 			@backupDestinationSummary(v)
@@ -193,7 +195,8 @@ templ backupDestinationBlock(v BackupsPageView) {
 							<p class="hint">Saving replaces the current destination. The app secret and refresh token fields start empty; the saved credentials keep working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
 							@backupDropboxForm(v)
 						case "gdrive":
-							@backupGDriveComing()
+							<p class="hint">Saving replaces the current destination and needs Connect with Google again. The client secret field starts empty; the saved settings keep working until you save.</p>
+							@backupGDriveForm(v)
 						default:
 							<p class="hint">The same grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
 							@backupDestinationForm(v)
@@ -205,7 +208,7 @@ templ backupDestinationBlock(v BackupsPageView) {
 					case "dropbox":
 						@backupDropboxForm(v)
 					case "gdrive":
-						@backupGDriveComing()
+						@backupGDriveForm(v)
 					default:
 						@backupDestinationWizard(v)
 				}
@@ -371,12 +374,196 @@ templ backupStoragePicker(v BackupsPageView) {
 	</div>
 }
 
-// backupGDriveComing is the Google Drive choice until its OAuth flow exists:
-// plain text, no controls.
-templ backupGDriveComing() {
-	<div class="backup-coming" role="note">
-		<p><strong>Google Drive is coming next.</strong> Connecting with your Google account will be added in a later update. Choose S3-compatible or Dropbox storage for now.</p>
+// backupGDriveSummary is the status card of a stored Google Drive
+// destination: folder, masked client id, authorization, the status pill
+// (Not connected until Connect with Google completes, then the latest test),
+// where the next backup lands and the last upload. It never holds the client
+// secret, the refresh token or the full client id. Connect with Google
+// renders only with ENGRAM_CLOUD_PUBLIC_URL; Test connection only once
+// authorized.
+templ backupGDriveSummary(v BackupsPageView) {
+	<div class="backup-summary">
+		<div class="backup-summary-body">
+			<h4 class="backup-summary-title">Google Drive <span class={ "backup-pill " + v.destinationStatus().Class }>{ v.destinationStatus().Label }</span></h4>
+			<p class="backup-summary-path">{ backupGDriveFolderPrefix(v.Destination.GDrive.FolderName) }</p>
+			@backupDestinationStatusMeta(v)
+		</div>
+		if v.settingsFormsVisible() {
+			<div class="backup-summary-actions">
+				if v.Destination.GDrive.Authorized {
+					<form method="post" action="/dashboard/admin/backups/destination/test" class="switch-form">
+						if v.DestinationTest.Tested() {
+							<button type="submit" class="secondary">Test again</button>
+						} else {
+							<button type="submit">Test connection</button>
+						}
+					</form>
+				}
+				if v.gdriveConnectVisible() {
+					<form method="post" action="/dashboard/admin/backups/gdrive/connect" class="switch-form">
+						if v.Destination.GDrive.Authorized {
+							<button type="submit" class="secondary">Reconnect with Google</button>
+						} else {
+							<button type="submit">Connect with Google</button>
+						}
+					</form>
+				}
+			</div>
+		}
 	</div>
+	if v.settingsFormsVisible() && v.GDriveRedirectURI == "" {
+		@backupGDrivePublicURLNote()
+	}
+	if s := v.destinationStatus(); s.Title != "" {
+		<div class="backup-status-line"><p><strong>{ s.Title }</strong> { s.Detail }</p></div>
+	}
+	<div class="backup-path-strip" role="group" aria-label="Where the next backup lands">
+		<p class="backup-path-line">
+			<span class="backup-path-seg is-bucket"><small>Folder in My Drive</small><span class="backup-path-bucket">{ backupGDriveFolderPrefix(v.Destination.GDrive.FolderName) }</span></span>
+			<span class="backup-path-seg"><small>File, one per run</small><span class="backup-path-file">{ backupObjectNamePattern }</span></span>
+		</p>
+	</div>
+	<dl class="backup-facts">
+		<div><dt>Storage</dt><dd>Google Drive</dd></div>
+		<div><dt>Client ID</dt><dd><code>{ v.Destination.AccessKeyIDHint }</code></dd></div>
+		<div>
+			<dt>Authorization</dt>
+			if v.Destination.GDrive.Authorized {
+				<dd>Connected</dd>
+			} else {
+				<dd>Pending</dd>
+			}
+		</div>
+		<div><dt>Saved</dt><dd>{ formatTimeValue(v.Destination.UpdatedAt) }</dd></div>
+	</dl>
+	@backupRunFacts(v)
+	if v.settingsFormsVisible() {
+		<details class="backup-remove"><summary class="backup-remove-toggle">Remove destination</summary>
+			<form method="post" action="/dashboard/admin/backups/destination/remove" class="backup-confirm">
+				<p><strong>Remove this destination?</strong> Engram stops uploading to <strong>{ v.Destination.GDrive.FolderName }</strong> and deletes the saved client secret and Google authorization. Backups already uploaded stay in Google Drive. To revoke Engram's access too, remove it at <a href="https://myaccount.google.com/permissions" rel="noopener noreferrer" target="_blank">myaccount.google.com/permissions</a>. While the schedule stays enabled, each scheduled run is recorded as skipped until you save a new destination.</p>
+				<button type="submit" class="backup-danger-fill">Yes, remove destination</button>
+			</form>
+		</details>
+	}
+}
+
+// backupGDrivePublicURLNote explains why Connect with Google is missing:
+// the redirect URI is built only from ENGRAM_CLOUD_PUBLIC_URL.
+templ backupGDrivePublicURLNote() {
+	<div class="backup-note" role="note">
+		<p><strong>Set <code>ENGRAM_CLOUD_PUBLIC_URL</code> to connect Google Drive.</strong> Google sends the browser back to this dashboard after you allow access, so Engram needs the dashboard's public https address (for example <code>https://engram.example.com</code>) to build the redirect URI. Set it and restart <code>engram cloud serve</code>.</p>
+	</div>
+}
+
+// backupGDriveForm is the Google Drive destination form: a plain POST to the
+// save route with kind=gdrive. Saving stores the OAuth client pending
+// authorization; Connect with Google on the status card authorizes it, so
+// there is no check before saving. The client secret is required on every
+// save and always renders empty.
+templ backupGDriveForm(v BackupsPageView) {
+	<form method="post" action="/dashboard/admin/backups/destination" class="backup-provider-form backup-gdrive-form" autocomplete="off">
+		<input type="hidden" name="kind" value="gdrive"/>
+		if v.gdriveSaveRefused() {
+			<div class="alert alert-danger" role="alert">
+				<p>
+					<strong>Destination not saved.</strong>
+					if reason := v.gdriveErrorUnplaced(); reason != "" {
+						{ reason + "." }
+					} else {
+						Fix the field marked below.
+					}
+					Your client secret was not stored: paste it again.
+				</p>
+			</div>
+		}
+		<div class="backup-form-body">
+			<div class="backup-groups">
+				<fieldset class="backup-group">
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">1</span>Google OAuth client</legend>
+					<p class="hint backup-group-hint">A Web application client of your Google Cloud project; the guide below shows how to create one.</p>
+					<div class="backup-group-fields even">
+						<div class="backup-field">
+							<label for="backup-gdrive-client-id">Client ID</label>
+							<input type="text" id="backup-gdrive-client-id" name="client_id" value={ v.gdriveFormValue("client_id") } autocomplete="off" spellcheck="false" placeholder="….apps.googleusercontent.com" class="mono-input" required { v.gdriveFieldAttrs("client_id", "backup-gdrive-client-id", false)... }/>
+							@backupFieldError(v.gdriveFieldError("client_id"), "backup-gdrive-client-id")
+						</div>
+						<div class="backup-field">
+							<label for="backup-gdrive-client-secret">Client secret</label>
+							<input type="password" id="backup-gdrive-client-secret" name="client_secret" value="" autocomplete="new-password" placeholder="From the OAuth client's page" required { v.gdriveFieldAttrs("client_secret", "backup-gdrive-client-secret", false)... }/>
+							@backupFieldError(v.gdriveFieldError("client_secret"), "backup-gdrive-client-secret")
+						</div>
+					</div>
+				</fieldset>
+				<fieldset class="backup-group">
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">2</span>Location</legend>
+					<p class="hint backup-group-hint">Where the archives land.</p>
+					<div class="backup-group-fields">
+						<div class="backup-field">
+							<label for="backup-gdrive-folder">Folder</label>
+							<input type="text" id="backup-gdrive-folder" name="folder" value={ v.gdriveFormValue("folder") } placeholder="Engram backups" spellcheck="false" required { v.gdriveFieldAttrs("folder", "backup-gdrive-folder", true)... }/>
+							@backupFieldError(v.gdriveFieldError("folder"), "backup-gdrive-folder")
+							<span class="hint" id="backup-gdrive-folder-hint">A folder in My Drive, created by Engram on the first upload. With the <code>drive.file</code> scope Engram only sees the files and folders it created, never the rest of your Drive.</span>
+						</div>
+					</div>
+				</fieldset>
+				<fieldset class="backup-group">
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">3</span>Authorization</legend>
+					<p class="hint backup-group-hint">After saving, press <strong>Connect with Google</strong> on the status card and allow access with the account that should hold the backups.</p>
+					if v.GDriveRedirectURI != "" {
+						<div class="backup-redirect-uri">
+							<p class="backup-storage-label">Authorized redirect URI</p>
+							<p><code>{ v.GDriveRedirectURI }</code></p>
+							<p class="hint">Add this exact URI to the OAuth client in Google Cloud.</p>
+						</div>
+					} else {
+						@backupGDrivePublicURLNote()
+					}
+				</fieldset>
+			</div>
+			<aside class="backup-aside" aria-label="What you are saving">
+				<div class="backup-path-preview">
+					<p class="section-kicker">Backups will be saved as</p>
+					<p class="backup-path"><span class="backup-path-bucket">{ backupGDriveFolderPrefix(v.gdriveFormValue("folder")) }</span><span class="backup-path-file">{ "engram-cloud-backup-<UTC timestamp>-run<id>.tar.gz" }</span></p>
+					<p class="hint">One file per run: UTC time plus run number. Engram never deletes them.</p>
+				</div>
+				<div class="backup-why-keys">
+					<h5><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"></rect><path d="M5.5 7V5a2.5 2.5 0 015 0v2" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg>Why paste it again?</h5>
+					<p>Engram encrypts the client secret and the Google authorization together with this exact client ID and folder, and never shows them again, not even to admins.</p>
+					<p>So every save needs the secret and a new Connect with Google, even if you only changed the folder.</p>
+				</div>
+			</aside>
+		</div>
+		@backupGDriveHelp(v)
+		<div class="backup-submit-row">
+			<p class="muted">Saving stores the client; it does not contact Google. Then press <strong>Connect with Google</strong> to authorize Engram.</p>
+			<div class="backup-dropbox-actions">
+				<button type="submit">Save Google Drive settings</button>
+			</div>
+		</div>
+	</form>
+}
+
+// backupGDriveHelp explains, collapsed, how to create the Google OAuth
+// client, including the 7-day refresh token expiry of apps left in Testing.
+templ backupGDriveHelp(v BackupsPageView) {
+	<details class="backup-help">
+		<summary>How to create a Google OAuth client</summary>
+		<ol class="backup-help-steps">
+			<li>Open the <a href="https://console.cloud.google.com/" rel="noopener noreferrer" target="_blank">Google Cloud console</a> and create or pick a project.</li>
+			<li>In <strong>APIs &amp; Services → Library</strong>, enable the <strong>Google Drive API</strong>.</li>
+			<li>Configure the <strong>OAuth consent screen</strong> (Google Auth Platform): choose <strong>External</strong> (any Google account, such as Gmail) or <strong>Internal</strong> (only accounts of your Google Workspace organization). With External, add yourself as a <strong>test user</strong> under <strong>Audience</strong>. Under <strong>Data access</strong>, add the <code>drive.file</code> scope (<code>https://www.googleapis.com/auth/drive.file</code>).</li>
+			<li><strong>Important:</strong> while an External app's publishing status is <strong>Testing</strong>, Google expires its refresh tokens after 7 days and scheduled backups stop. Under <strong>Audience</strong>, press <strong>Publish app</strong> to move it to <strong>In production</strong>. <code>drive.file</code> is a recommended, non-sensitive scope, so publishing does not need Google's sensitive-scope verification. Internal apps have no Testing status.</li>
+			<li>
+				In <strong>Clients</strong> (or <strong>Credentials → Create credentials → OAuth client ID</strong>), create a client of type <strong>Web application</strong>. Under <strong>Authorized redirect URIs</strong>, add exactly:
+				if v.GDriveRedirectURI != "" {
+					<pre class="backup-help-code"><code>{ v.GDriveRedirectURI }</code></pre>
+				} else {
+					the URI this form shows once <code>ENGRAM_CLOUD_PUBLIC_URL</code> is set.
+				}
+			</li>
+			<li>Copy the <strong>Client ID</strong> and the <strong>Client secret</strong> into this form and save, then press <strong>Connect with Google</strong> and sign in with the account that should hold the backups. Engram asks only for <code>drive.file</code>.</li>
+		</ol>
+	</details>
 }
 
 // backupDropboxForm is the Dropbox destination form: a plain POST to the
@@ -500,6 +687,8 @@ templ backupDestinationStatusMeta(v BackupsPageView) {
 		switch {
 			case v.Settings == BackupSettingsKeyMissing:
 				The saved keys cannot be used or tested until <code>ENGRAM_CLOUD_BACKUP_KEY</code> is set.
+			case v.gdrivePending():
+				Not connected yet: press <strong>Connect with Google</strong> and allow access with the account that should hold the backups. Scheduled backups are recorded as skipped until then.
 			case !v.DestinationTest.Tested():
 				{ v.untestedNote() }
 			default:

@@ -3030,10 +3030,11 @@ details.tech-details > summary:hover {
 	margin: 0.35rem 0 0;
 }
 
-/* Google Drive until its OAuth flow exists: text only. */
+/* Explanatory note without controls (Google Drive needs
+   ENGRAM_CLOUD_PUBLIC_URL before Connect with Google can render). */
 
-.backup-coming {
-	margin: 0 0 0.5rem;
+.backup-note {
+	margin: 0.5rem 0;
 	padding: 0.8rem 1.1rem;
 	border-left: 2px solid var(--engram-info);
 	border-radius: var(--shape-medium);
@@ -3041,8 +3042,22 @@ details.tech-details > summary:hover {
 	color: var(--engram-text-soft);
 }
 
-.backup-coming p {
+.backup-note p {
 	margin: 0;
+}
+
+/* Google Drive form: the exact redirect URI to register with Google. */
+
+.backup-redirect-uri p {
+	margin: 0 0 0.35rem;
+}
+
+.backup-redirect-uri code {
+	display: inline-block;
+	max-width: 100%;
+	overflow-wrap: anywhere;
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
 }
 
 /* Dropbox form: collapsed setup guide and the Save / Test actions. */
