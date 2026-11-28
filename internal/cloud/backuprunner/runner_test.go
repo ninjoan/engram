@@ -320,7 +320,7 @@ func TestScheduledSlotWhileBusyIsLeftForAnotherServer(t *testing.T) {
 	freeClock, freeLogs, freeUploader := newFakeClock(beforeSlot), &logSink{}, &fakeUploader{}
 	free, err := New(Config{
 		Store: busy.store, Key: fakeOpener{}, Clock: freeClock, TempDir: t.TempDir(), Export: writeArchive,
-		NewUploader: func(cloudstore.BackupDestinationCredentials) (Uploader, error) { return freeUploader, nil },
+		NewS3Client: func(cloudstore.BackupDestinationCredentials) (S3Client, error) { return freeUploader, nil },
 		Logf:        freeLogs.Logf,
 	})
 	if err != nil {
@@ -486,7 +486,7 @@ func TestOverallUploadDeadlineIsEnforced(t *testing.T) {
 	t.Cleanup(func() { close(hang); srv.Close() })
 	var gotSize int64
 	h := newHarness(t, beforeSlot, func(cfg *Config) {
-		cfg.NewUploader = nil // the real s3client
+		cfg.NewS3Client = nil // the real s3client
 		cfg.UploadDeadline = func(size int64) time.Duration {
 			atomic.StoreInt64(&gotSize, size)
 			return 200 * time.Millisecond
@@ -775,7 +775,7 @@ func (e *credentialEchoError) Error() string { return e.msg }
 // without the credentials it may echo, and uploads nothing.
 func TestInvalidDestinationErrorIsRecordedWithoutCredentials(t *testing.T) {
 	h := newHarness(t, beforeSlot, func(cfg *Config) {
-		cfg.NewUploader = func(creds cloudstore.BackupDestinationCredentials) (Uploader, error) {
+		cfg.NewS3Client = func(creds cloudstore.BackupDestinationCredentials) (S3Client, error) {
 			return nil, &credentialEchoError{msg: "bad endpoint for " + creds.SecretAccessKey + " id=" + creds.AccessKeyID}
 		}
 	})

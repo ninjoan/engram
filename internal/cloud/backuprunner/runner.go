@@ -2,9 +2,10 @@
 // a scheduler loop that uploads a backup at every slot of the dashboard
 // schedule, and the manual "Back up now" runs. Each run exports one archive
 // (cloudbackup.Export) into a private temp file on the server's disk, uploads
-// it with a single PUT to the configured S3-compatible destination and
-// records the result in the backup run history. It never deletes objects;
-// retention belongs to the bucket's lifecycle rules.
+// it with the Uploader of the configured destination's kind (S3: a single
+// PUT; Dropbox and Google Drive: the uploaders the server wires through
+// Config) and records the result in the backup run history. It never deletes
+// objects or files; retention belongs to the destination's own rules.
 //
 // Several servers may share one database: a scheduled slot is claimed with a
 // unique history row (cloudstore.StartBackupRun), so exactly one server
@@ -28,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,9 +98,22 @@ const (
 	SkippedNoDestinationMessage = "skipped: no backup destination is configured"
 	SkippedKeyMismatchMessage   = "skipped: the stored destination credentials cannot be opened with the current ENGRAM_CLOUD_BACKUP_KEY; save the destination again"
 	SkippedBusyMessage          = "skipped: another backup was still running"
+	// SkippedNotAuthorizedMessage records a run of a Google Drive
+	// destination whose OAuth authorization is still pending.
+	SkippedNotAuthorizedMessage = "skipped: the Google Drive destination is not authorized yet; connect it from the dashboard"
 	CanceledMessage             = "canceled: the server stopped before the backup finished"
 	InternalErrorMessage        = "internal error while running the backup; see the server log"
 )
+
+// SkippedUnsupportedMessage records a run of a destination kind this server
+// has no uploader for.
+func SkippedUnsupportedMessage(kind string) string {
+	return "skipped: " + unsupportedKindReason(kind)
+}
+
+func unsupportedKindReason(kind string) string {
+	return kind + " destination is not supported by this server yet"
+}
 
 // ErrRunnerStopped refuses a manual backup when the runner is not running.
 var ErrRunnerStopped = errors.New("backuprunner: the backup runner is not running")
@@ -107,15 +122,75 @@ var ErrRunnerStopped = errors.New("backuprunner: the backup runner is not runnin
 type Store interface {
 	cloudbackup.Source
 	GetBackupSchedule(ctx context.Context) (cloudstore.BackupSchedule, error)
-	OpenBackupDestinationCredentials(ctx context.Context, opener cloudstore.BackupSecretOpener) (cloudstore.BackupDestinationCredentials, error)
+	// GetBackupDestination tells a manual run the destination's kind before
+	// it is claimed; it opens nothing.
+	GetBackupDestination(ctx context.Context) (cloudstore.BackupDestination, error)
+	OpenBackupDestination(ctx context.Context, opener cloudstore.BackupSecretOpener) (cloudstore.OpenedBackupDestination, error)
 	StartBackupRun(ctx context.Context, params cloudstore.StartBackupRunParams) (cloudstore.BackupRun, error)
 	FinishBackupRun(ctx context.Context, params cloudstore.FinishBackupRunParams) (cloudstore.BackupRun, error)
 	ExpireStaleBackupRuns(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
-// Uploader stores one object; *s3client.Client satisfies it.
+// Uploader stores one backup archive at a destination of any kind.
 type Uploader interface {
+	// Upload stores size bytes of body as objectName, a kind-neutral file
+	// name such as engram-cloud-backup-20261130T030000Z-run1.tar.gz, inside
+	// the destination's prefix or folder. It returns where the archive was
+	// stored, which the run history records (S3: the object key). ctx carries
+	// the overall upload deadline. It never deletes anything.
+	Upload(ctx context.Context, objectName string, body io.ReadSeeker, size int64) (location string, err error)
+	// CheckAccess verifies, without writing, that the destination accepts
+	// the credentials.
+	CheckAccess(ctx context.Context) error
+}
+
+// S3Client is the S3 API the S3 uploader uses; *s3client.Client satisfies it.
+type S3Client interface {
 	PutObject(ctx context.Context, key string, body io.ReadSeeker, size int64, contentType string) error
+	CheckAccess(ctx context.Context) error
+}
+
+// NewS3Client builds the S3 client of an opened s3 destination; it is the
+// default Config.NewS3Client.
+func NewS3Client(creds cloudstore.BackupDestinationCredentials) (S3Client, error) {
+	return s3client.New(s3client.Config{
+		Endpoint: creds.Endpoint, Region: creds.Region, Bucket: creds.Bucket,
+		AccessKeyID: creds.AccessKeyID, SecretAccessKey: creds.SecretAccessKey,
+	})
+}
+
+// s3Uploader stores archives as objects under the destination's prefix.
+type s3Uploader struct {
+	client S3Client
+	prefix string
+}
+
+func newS3Uploader(client S3Client, prefix string) Uploader {
+	return s3Uploader{client: client, prefix: prefix}
+}
+
+// Upload puts objectName under the prefix with the key
+// s3client.BackupRunObjectKey produces and returns that key.
+func (u s3Uploader) Upload(ctx context.Context, objectName string, body io.ReadSeeker, size int64) (string, error) {
+	key := s3ObjectKey(u.prefix, objectName)
+	if err := u.client.PutObject(ctx, key, body, size, ContentType); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+func (u s3Uploader) CheckAccess(ctx context.Context) error { return u.client.CheckAccess(ctx) }
+
+// s3ObjectKey joins prefix and name like s3client.BackupRunObjectKey:
+// surrounding spaces and empty path segments of prefix are dropped.
+func s3ObjectKey(prefix, name string) string {
+	var segments []string
+	for _, s := range strings.Split(strings.TrimSpace(prefix), "/") {
+		if s != "" {
+			segments = append(segments, s)
+		}
+	}
+	return strings.Join(append(segments, name), "/")
 }
 
 // Clock is the time source of the scheduler.
@@ -147,9 +222,15 @@ type Config struct {
 	// TempDir holds the archive while it is uploaded; empty is the system
 	// temp directory.
 	TempDir string
-	// NewUploader builds the uploader for the opened destination; it
-	// defaults to an s3client.Client.
-	NewUploader func(cloudstore.BackupDestinationCredentials) (Uploader, error)
+	// NewS3Client builds the S3 client of an s3 destination; it defaults
+	// to NewS3Client.
+	NewS3Client func(cloudstore.BackupDestinationCredentials) (S3Client, error)
+	// NewDropboxUploader and NewGDriveUploader build the uploader of a
+	// Dropbox or Google Drive destination from its opened credentials. Nil
+	// means this server does not support that kind: a scheduled run is
+	// recorded as skipped and a manual run is refused.
+	NewDropboxUploader func(cloudstore.DropboxDestinationCredentials) (Uploader, error)
+	NewGDriveUploader  func(cloudstore.GDriveDestinationCredentials) (Uploader, error)
 	// Export writes one archive; it defaults to cloudbackup.Export of Store.
 	Export func(ctx context.Context, w io.Writer) error
 	// Logf defaults to log.Printf.
@@ -167,7 +248,9 @@ type Runner struct {
 	exportTimeout  time.Duration
 	uploadDeadline func(int64) time.Duration
 	tempDir        string
-	newUploader    func(cloudstore.BackupDestinationCredentials) (Uploader, error)
+	newS3Client    func(cloudstore.BackupDestinationCredentials) (S3Client, error)
+	newDropbox     func(cloudstore.DropboxDestinationCredentials) (Uploader, error)
+	newGDrive      func(cloudstore.GDriveDestinationCredentials) (Uploader, error)
 	export         func(context.Context, io.Writer) error
 	logf           func(string, ...any)
 	// finishBackoff is the wait before the second attempt to record a
@@ -210,7 +293,8 @@ func New(cfg Config) (*Runner, error) {
 		store: cfg.Store, key: cfg.Key, clock: cfg.Clock,
 		poll: cfg.PollInterval, staleAfter: cfg.StaleAfter, exportTimeout: cfg.ExportTimeout,
 		uploadDeadline: cfg.UploadDeadline, tempDir: cfg.TempDir,
-		newUploader: cfg.NewUploader, export: cfg.Export, logf: cfg.Logf,
+		newS3Client: cfg.NewS3Client, newDropbox: cfg.NewDropboxUploader, newGDrive: cfg.NewGDriveUploader,
+		export: cfg.Export, logf: cfg.Logf,
 		finishBackoff: finishBackoff,
 	}
 	if r.poll < 0 || r.staleAfter < 0 || r.exportTimeout < 0 {
@@ -239,8 +323,8 @@ func New(cfg Config) (*Runner, error) {
 	if r.tempDir == "" {
 		r.tempDir = os.TempDir()
 	}
-	if r.newUploader == nil {
-		r.newUploader = newS3Uploader
+	if r.newS3Client == nil {
+		r.newS3Client = NewS3Client
 	}
 	if r.export == nil {
 		store, version, tempDir := cfg.Store, cfg.EngramVersion, r.tempDir
@@ -255,11 +339,39 @@ func New(cfg Config) (*Runner, error) {
 	return r, nil
 }
 
-func newS3Uploader(creds cloudstore.BackupDestinationCredentials) (Uploader, error) {
-	return s3client.New(s3client.Config{
-		Endpoint: creds.Endpoint, Region: creds.Region, Bucket: creds.Bucket,
-		AccessKeyID: creds.AccessKeyID, SecretAccessKey: creds.SecretAccessKey,
-	})
+// errUnsupportedKind marks a destination kind without an uploader.
+var errUnsupportedKind = errors.New("unsupported destination kind")
+
+// supportsKind reports whether this runner can upload to kind.
+func (r *Runner) supportsKind(kind string) bool {
+	switch kind {
+	case cloudstore.BackupDestinationKindS3:
+		return true
+	case cloudstore.BackupDestinationKindDropbox:
+		return r.newDropbox != nil
+	case cloudstore.BackupDestinationKindGDrive:
+		return r.newGDrive != nil
+	}
+	return false
+}
+
+// uploaderFor builds the uploader of the opened destination's kind; it
+// returns errUnsupportedKind when this runner has none.
+func (r *Runner) uploaderFor(dest cloudstore.OpenedBackupDestination) (Uploader, error) {
+	if !r.supportsKind(dest.Kind) {
+		return nil, errUnsupportedKind
+	}
+	switch dest.Kind {
+	case cloudstore.BackupDestinationKindDropbox:
+		return r.newDropbox(dest.Dropbox)
+	case cloudstore.BackupDestinationKindGDrive:
+		return r.newGDrive(dest.GDrive)
+	}
+	client, err := r.newS3Client(dest.S3)
+	if err != nil {
+		return nil, err
+	}
+	return newS3Uploader(client, dest.S3.Prefix), nil
 }
 
 // Start removes stale archive temp files, then launches the scheduler loop,
@@ -308,6 +420,14 @@ func (r *Runner) StartManualBackup(ctx context.Context, actorPrincipalID string)
 	if !r.busy.CompareAndSwap(false, true) {
 		r.wg.Done()
 		return 0, fmt.Errorf("%w on this server", cloudserver.ErrBackupAlreadyRunning)
+	}
+	// A destination this server cannot upload to is refused before a run is
+	// recorded. When the destination cannot be read here, the run starts
+	// and records the real reason.
+	if dest, err := r.store.GetBackupDestination(ctx); err == nil && dest.Configured && !r.supportsKind(dest.Kind) {
+		r.busy.Store(false)
+		r.wg.Done()
+		return 0, fmt.Errorf("%w: %s", cloudserver.ErrBackupDestinationUnsupported, unsupportedKindReason(dest.Kind))
 	}
 	r.expireStale(ctx)
 	run, err := r.claim(cloudstore.StartBackupRunParams{
@@ -564,7 +684,7 @@ func (r *Runner) execute(ctx context.Context, run cloudstore.BackupRun, stamp ti
 		r.finish(result)
 	}()
 
-	creds, err := r.store.OpenBackupDestinationCredentials(ctx, r.key)
+	dest, err := r.store.OpenBackupDestination(ctx, r.key)
 	switch {
 	case errors.Is(err, cloudstore.ErrBackupDestinationNotConfigured):
 		result.ErrorMessage = SkippedNoDestinationMessage
@@ -576,27 +696,39 @@ func (r *Runner) execute(ctx context.Context, run cloudstore.BackupRun, stamp ti
 		result.ErrorMessage = r.failure(ctx, "read the backup destination", err)
 		return
 	}
-	result.Redact = []string{creds.AccessKeyID, creds.SecretAccessKey}
-	uploader, err := r.newUploader(creds)
+	result.Redact = dest.Secrets()
+	if !r.supportsKind(dest.Kind) {
+		result.ErrorMessage = SkippedUnsupportedMessage(dest.Kind)
+		return
+	}
+	if dest.Kind == cloudstore.BackupDestinationKindGDrive && !dest.GDrive.Authorized() {
+		result.ErrorMessage = SkippedNotAuthorizedMessage
+		return
+	}
+	uploader, err := r.uploaderFor(dest)
 	if err != nil {
 		result.ErrorMessage = "invalid backup destination: " + err.Error()
 		return
 	}
-	key := s3client.BackupRunObjectKey(creds.Prefix, stamp, run.ID)
-	size, err := r.exportAndUpload(ctx, uploader, key)
+	name := s3client.BackupRunObjectKey("", stamp, run.ID)
+	location, size, err := r.exportAndUpload(ctx, uploader, name)
 	if err != nil {
 		result.ErrorMessage = err.Error()
 		return
 	}
-	result = cloudstore.FinishBackupRunParams{ID: run.ID, Status: cloudstore.BackupRunStatusSuccess, ObjectKey: key, SizeBytes: size}
+	if location == "" {
+		location = name
+	}
+	result = cloudstore.FinishBackupRunParams{ID: run.ID, Status: cloudstore.BackupRunStatusSuccess, ObjectKey: location, SizeBytes: size}
 }
 
 // exportAndUpload writes the archive to a private temp file and uploads it
-// under an overall deadline. The temp file is always removed.
-func (r *Runner) exportAndUpload(ctx context.Context, uploader Uploader, key string) (int64, error) {
+// as name under an overall deadline; it returns the uploader's location.
+// The temp file is always removed.
+func (r *Runner) exportAndUpload(ctx context.Context, uploader Uploader, name string) (string, int64, error) {
 	file, err := os.CreateTemp(r.tempDir, uploadTempPattern) // mode 0600
 	if err != nil {
-		return 0, fmt.Errorf("create the archive temp file: %w", err)
+		return "", 0, fmt.Errorf("create the archive temp file: %w", err)
 	}
 	defer func() {
 		_ = file.Close()
@@ -609,34 +741,34 @@ func (r *Runner) exportAndUpload(ctx context.Context, uploader Uploader, key str
 	cancelExport()
 	switch {
 	case ctx.Err() != nil:
-		return 0, errors.New(CanceledMessage)
+		return "", 0, errors.New(CanceledMessage)
 	case err != nil && errors.Is(exportErr, context.DeadlineExceeded):
-		return 0, fmt.Errorf("export did not finish within %s", r.exportTimeout)
+		return "", 0, fmt.Errorf("export did not finish within %s", r.exportTimeout)
 	case err != nil:
-		return 0, fmt.Errorf("export: %w", err)
+		return "", 0, fmt.Errorf("export: %w", err)
 	}
 	info, err := file.Stat()
 	if err != nil {
-		return 0, fmt.Errorf("stat the archive temp file: %w", err)
+		return "", 0, fmt.Errorf("stat the archive temp file: %w", err)
 	}
 	size := info.Size()
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return 0, fmt.Errorf("rewind the archive temp file: %w", err)
+		return "", 0, fmt.Errorf("rewind the archive temp file: %w", err)
 	}
 
 	deadline := r.uploadDeadline(size)
 	uploadCtx, cancelUpload := context.WithTimeout(ctx, deadline)
 	defer cancelUpload()
-	err = uploader.PutObject(uploadCtx, key, file, size, ContentType)
+	location, err := uploader.Upload(uploadCtx, name, file, size)
 	switch {
 	case err == nil:
-		return size, nil
+		return location, size, nil
 	case ctx.Err() != nil:
-		return 0, errors.New(CanceledMessage)
+		return "", 0, errors.New(CanceledMessage)
 	case errors.Is(uploadCtx.Err(), context.DeadlineExceeded):
-		return 0, fmt.Errorf("upload of %d bytes did not finish within the overall deadline of %s", size, deadline)
+		return "", 0, fmt.Errorf("upload of %d bytes did not finish within the overall deadline of %s", size, deadline)
 	default:
-		return 0, fmt.Errorf("upload: %w", err)
+		return "", 0, fmt.Errorf("upload: %w", err)
 	}
 }
 

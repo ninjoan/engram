@@ -108,6 +108,10 @@ type fakeStore struct {
 	scheduleErr error
 	creds       cloudstore.BackupDestinationCredentials
 	credsErr    error
+	// opened, when set, replaces the s3 creds with a destination of any kind.
+	opened *cloudstore.OpenedBackupDestination
+	// getErr makes GetBackupDestination fail.
+	getErr      error
 	runs        []cloudstore.BackupRun
 	redacts     map[int64][]string
 	expireCalls []time.Duration
@@ -178,14 +182,42 @@ func (s *fakeStore) GetBackupSchedule(context.Context) (cloudstore.BackupSchedul
 	return s.schedule, s.scheduleErr
 }
 
-func (s *fakeStore) OpenBackupDestinationCredentials(_ context.Context, opener cloudstore.BackupSecretOpener) (cloudstore.BackupDestinationCredentials, error) {
+// OpenBackupDestination returns the s3 creds, or opened when it is set.
+func (s *fakeStore) OpenBackupDestination(_ context.Context, opener cloudstore.BackupSecretOpener) (cloudstore.OpenedBackupDestination, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.opener = opener
 	if s.credsErr != nil {
-		return cloudstore.BackupDestinationCredentials{}, s.credsErr
+		return cloudstore.OpenedBackupDestination{}, s.credsErr
 	}
-	return s.creds, nil
+	if s.opened != nil {
+		return *s.opened, nil
+	}
+	return cloudstore.OpenedBackupDestination{Kind: cloudstore.BackupDestinationKindS3, S3: s.creds}, nil
+}
+
+// GetBackupDestination reports the kind OpenBackupDestination would open.
+// It is not recorded in calls, which tracks the run history writes.
+func (s *fakeStore) GetBackupDestination(context.Context) (cloudstore.BackupDestination, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.getErr != nil {
+		return cloudstore.BackupDestination{}, s.getErr
+	}
+	if errors.Is(s.credsErr, cloudstore.ErrBackupDestinationNotConfigured) {
+		return cloudstore.BackupDestination{}, nil
+	}
+	kind := cloudstore.BackupDestinationKindS3
+	if s.opened != nil {
+		kind = s.opened.Kind
+	}
+	return cloudstore.BackupDestination{Configured: true, Kind: kind}, nil
+}
+
+func (s *fakeStore) setOpened(opened *cloudstore.OpenedBackupDestination) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.opened = opened
 }
 
 func (s *fakeStore) StartBackupRun(ctx context.Context, params cloudstore.StartBackupRunParams) (cloudstore.BackupRun, error) {
@@ -296,7 +328,7 @@ func (s *fakeStore) expireCount() int {
 	return len(s.expireCalls)
 }
 
-// fakeUploader records every PutObject. block, when set, runs before the
+// fakeUploader is the S3 client of the runner; it records every PutObject. block, when set, runs before the
 // upload is recorded and may return an error.
 type fakeUploader struct {
 	mu      sync.Mutex
@@ -337,6 +369,8 @@ func (u *fakeUploader) PutObject(ctx context.Context, key string, body io.ReadSe
 	u.puts = append(u.puts, put)
 	return u.err
 }
+
+func (u *fakeUploader) CheckAccess(context.Context) error { return u.err }
 
 func (u *fakeUploader) snapshot() []fakePut {
 	u.mu.Lock()
@@ -395,7 +429,7 @@ func newHarness(t *testing.T, start time.Time, mutate func(*Config)) *harness {
 		Clock:       h.clock,
 		TempDir:     h.tempDir,
 		Export:      writeArchive,
-		NewUploader: func(cloudstore.BackupDestinationCredentials) (Uploader, error) { return h.uploader, nil },
+		NewS3Client: func(cloudstore.BackupDestinationCredentials) (S3Client, error) { return h.uploader, nil },
 		Logf:        h.logs.Logf,
 	}
 	if mutate != nil {

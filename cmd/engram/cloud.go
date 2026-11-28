@@ -185,7 +185,10 @@ func cloudRuntimeBackupOptions(cfg cloud.Config, cs *cloudstore.CloudStore) (clo
 	if err != nil {
 		return cloudRuntimeBackups{}, cloudServeBackupKeyRefusal(err)
 	}
-	runner, err := backuprunner.New(backuprunner.Config{Store: cs, Key: sealer, EngramVersion: version})
+	// Only the S3 uploader is wired so far: a Dropbox or Google Drive
+	// destination is recorded as skipped and its manual runs are refused
+	// until NewDropboxUploader and NewGDriveUploader are set here.
+	runner, err := backuprunner.New(backuprunner.Config{Store: cs, Key: sealer, EngramVersion: version, NewS3Client: backuprunner.NewS3Client})
 	if err != nil {
 		return cloudRuntimeBackups{}, fmt.Errorf("cloud serve: refusing to start: backup runner: %w", err)
 	}

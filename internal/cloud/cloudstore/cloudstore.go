@@ -936,9 +936,13 @@ func (cs *CloudStore) migrateSchema(ctx context.Context) error {
 		// cloud_backup_destinations: the single external backup destination.
 		// Credentials are sealed with ENGRAM_CLOUD_BACKUP_KEY (see
 		// backup_destination.go); the table is never exported in a backup.
+		// kind selects the columns in use: s3 uses endpoint..secret_access_key_ciphertext;
+		// dropbox and gdrive use client_id (app key / OAuth client id, not
+		// secret), folder, client_secret_ciphertext and
+		// refresh_token_ciphertext (empty for gdrive until authorized).
 		`CREATE TABLE IF NOT EXISTS cloud_backup_destinations (
 			id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-			kind TEXT NOT NULL CHECK (kind IN ('s3')),
+			kind TEXT NOT NULL CONSTRAINT cloud_backup_destinations_kind_check CHECK (kind IN ('s3', 'dropbox', 'gdrive')),
 			endpoint TEXT NOT NULL,
 			region TEXT NOT NULL,
 			bucket TEXT NOT NULL,
@@ -948,8 +952,40 @@ func (cs *CloudStore) migrateSchema(ctx context.Context) error {
 			secret_access_key_ciphertext TEXT NOT NULL,
 			key_fingerprint TEXT NOT NULL,
 			updated_by_principal_id BIGINT REFERENCES cloud_principals(id) ON DELETE SET NULL,
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			client_id TEXT NOT NULL DEFAULT '',
+			folder TEXT NOT NULL DEFAULT '',
+			client_secret_ciphertext TEXT NOT NULL DEFAULT '',
+			refresh_token_ciphertext TEXT NOT NULL DEFAULT '',
+			CONSTRAINT cloud_backup_destinations_kind_shape_check CHECK (` + backupDestinationKindShapeCheck + `)
 		)`,
+		// Tables created before Dropbox and Google Drive destinations hold
+		// only S3 rows: add the new columns (empty for those rows), widen
+		// the kind check and add the per-kind shape check. NOT VALID keeps a
+		// startup from failing on an unexpected legacy row; new writes are
+		// still checked. Every step is a no-op on an up-to-date table.
+		`ALTER TABLE cloud_backup_destinations ADD COLUMN IF NOT EXISTS client_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cloud_backup_destinations ADD COLUMN IF NOT EXISTS folder TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cloud_backup_destinations ADD COLUMN IF NOT EXISTS client_secret_ciphertext TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cloud_backup_destinations ADD COLUMN IF NOT EXISTS refresh_token_ciphertext TEXT NOT NULL DEFAULT ''`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid = 'cloud_backup_destinations'::regclass
+				AND conname = 'cloud_backup_destinations_kind_check'
+				AND pg_get_constraintdef(oid) LIKE '%gdrive%'
+			) THEN
+				ALTER TABLE cloud_backup_destinations DROP CONSTRAINT IF EXISTS cloud_backup_destinations_kind_check;
+				ALTER TABLE cloud_backup_destinations ADD CONSTRAINT cloud_backup_destinations_kind_check CHECK (kind IN ('s3', 'dropbox', 'gdrive'));
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid = 'cloud_backup_destinations'::regclass
+				AND conname = 'cloud_backup_destinations_kind_shape_check'
+			) THEN
+				ALTER TABLE cloud_backup_destinations ADD CONSTRAINT cloud_backup_destinations_kind_shape_check CHECK (` + backupDestinationKindShapeCheck + `) NOT VALID;
+			END IF;
+		END $$`,
 		// cloud_backup_schedule: the single weekday/time schedule for uploads
 		// to the destination (see backup_schedule.go). weekdays is a bitmask,
 		// bit n = time.Weekday n. Never exported in a backup.

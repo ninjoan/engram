@@ -16,16 +16,25 @@ import (
 	"unicode/utf8"
 )
 
-// External backup destination. At most one destination exists. Its
-// credentials are sealed by a BackupSecretSealer (internal/cloud/backupcrypto
+// External backup destination. At most one destination exists, of one kind:
+// an S3-compatible bucket, a Dropbox folder or a Google Drive folder. Its
+// secrets are sealed by a BackupSecretSealer (internal/cloud/backupcrypto
 // keyed by ENGRAM_CLOUD_BACKUP_KEY) before they reach the database, are never
 // returned by GetBackupDestination, and are only opened for the uploader.
+// Each sealed secret is bound to its field, the kind and every non-secret
+// setting of the destination (see backupDestinationTarget.associatedData).
+// The Dropbox and Google Drive kinds live in backup_destination_kinds.go.
 
 const (
-	BackupDestinationKindS3 = "s3"
+	BackupDestinationKindS3      = "s3"
+	BackupDestinationKindDropbox = "dropbox"
+	BackupDestinationKindGDrive  = "gdrive"
 
 	AuthAuditActionBackupDestinationUpdate = "backup.destination.update"
 	AuthAuditActionBackupDestinationClear  = "backup.destination.clear"
+	// AuthAuditActionBackupDestinationAuthorize is recorded when the OAuth
+	// refresh token of a Google Drive destination is stored.
+	AuthAuditActionBackupDestinationAuthorize = "backup.destination.authorize"
 	// AuthAuditActionBackupDestinationTest is recorded by the dashboard
 	// "Test connection" route: outcome success, or failure with a reason
 	// code (auth_failed, bucket_not_found, network, unexpected_response,
@@ -40,7 +49,26 @@ var (
 	ErrInvalidBackupDestination       = errors.New("cloudstore: invalid backup destination")
 	ErrBackupDestinationNotConfigured = errors.New("cloudstore: backup destination is not configured")
 	ErrBackupDestinationKeyRequired   = errors.New("cloudstore: ENGRAM_CLOUD_BACKUP_KEY is required for backup destination credentials")
+	// ErrBackupDestinationKindMismatch refuses a kind-specific operation on
+	// a destination of another kind.
+	ErrBackupDestinationKindMismatch = errors.New("cloudstore: the backup destination is of another kind")
+	// ErrBackupDestinationKeyChanged refuses adding a secret to a destination
+	// whose other secrets were sealed with another key.
+	ErrBackupDestinationKeyChanged = errors.New("cloudstore: the backup destination was saved with another ENGRAM_CLOUD_BACKUP_KEY; save it again")
 )
+
+// backupDestinationKindShapeCheck is the per-kind CHECK of
+// cloud_backup_destinations: each kind fills its own columns and leaves the
+// others empty. A gdrive row may lack its refresh token (pending
+// authorization).
+const backupDestinationKindShapeCheck = `CASE kind
+				WHEN 's3' THEN endpoint <> '' AND bucket <> '' AND access_key_id_ciphertext <> '' AND secret_access_key_ciphertext <> ''
+					AND client_id = '' AND folder = '' AND client_secret_ciphertext = '' AND refresh_token_ciphertext = ''
+				WHEN 'dropbox' THEN client_id <> '' AND folder <> '' AND client_secret_ciphertext <> '' AND refresh_token_ciphertext <> ''
+					AND endpoint = '' AND region = '' AND bucket = '' AND prefix = '' AND access_key_id_hint = '' AND access_key_id_ciphertext = '' AND secret_access_key_ciphertext = ''
+				WHEN 'gdrive' THEN client_id <> '' AND folder <> '' AND client_secret_ciphertext <> ''
+					AND endpoint = '' AND region = '' AND bucket = '' AND prefix = '' AND access_key_id_hint = '' AND access_key_id_ciphertext = '' AND secret_access_key_ciphertext = ''
+				ELSE FALSE END`
 
 // BackupSecretSealer seals one credential bound to associatedData.
 type BackupSecretSealer interface {
@@ -75,17 +103,21 @@ type PutBackupDestinationParams struct {
 
 // BackupDestination is the non-secret view of the destination. It never holds
 // a credential or ciphertext; AccessKeyIDHint shows only the last characters.
+// Endpoint through AccessKeyIDHint describe an s3 destination; Dropbox and
+// GDrive describe the other kinds and are zero for any other kind.
 type BackupDestination struct {
-	Configured           bool      `json:"configured"`
-	Kind                 string    `json:"kind,omitempty"`
-	Endpoint             string    `json:"endpoint,omitempty"`
-	Region               string    `json:"region,omitempty"`
-	Bucket               string    `json:"bucket,omitempty"`
-	Prefix               string    `json:"prefix,omitempty"`
-	AccessKeyIDHint      string    `json:"access_key_id_hint,omitempty"`
-	KeyFingerprint       string    `json:"key_fingerprint,omitempty"`
-	UpdatedByPrincipalID string    `json:"updated_by_principal_id,omitempty"`
-	UpdatedAt            time.Time `json:"updated_at,omitzero"`
+	Configured           bool                   `json:"configured"`
+	Kind                 string                 `json:"kind,omitempty"`
+	Endpoint             string                 `json:"endpoint,omitempty"`
+	Region               string                 `json:"region,omitempty"`
+	Bucket               string                 `json:"bucket,omitempty"`
+	Prefix               string                 `json:"prefix,omitempty"`
+	AccessKeyIDHint      string                 `json:"access_key_id_hint,omitempty"`
+	Dropbox              DropboxDestinationView `json:"dropbox,omitzero"`
+	GDrive               GDriveDestinationView  `json:"gdrive,omitzero"`
+	KeyFingerprint       string                 `json:"key_fingerprint,omitempty"`
+	UpdatedByPrincipalID string                 `json:"updated_by_principal_id,omitempty"`
+	UpdatedAt            time.Time              `json:"updated_at,omitzero"`
 }
 
 // BackupDestinationTest is the newest connection test of the current
@@ -122,17 +154,36 @@ func (c BackupDestinationCredentials) Format(f fmt.State, _ rune) {
 	_, _ = io.WriteString(f, fmt.Sprintf("{Endpoint:%s Region:%s Bucket:%s Prefix:%s AccessKeyID:redacted SecretAccessKey:redacted}", c.Endpoint, c.Region, c.Bucket, c.Prefix))
 }
 
-// backupDestinationTarget is the validated, normalized destination.
+// backupDestinationTarget is the validated, normalized non-secret part of a
+// destination: endpoint..prefix for s3, clientID and folder for the others.
 type backupDestinationTarget struct {
 	kind, endpoint, region, bucket, prefix string
+	clientID, folder                       string
 }
 
 // associatedData binds a sealed credential to its field and to the exact
-// destination it authorizes, so a database write that redirects the endpoint
-// or bucket makes the credentials unopenable instead of sending them there.
+// destination it authorizes, so a database write that redirects the endpoint,
+// bucket, folder or OAuth client makes the credentials unopenable instead of
+// sending them there. The s3 form is the one stored rows were sealed with
+// before other kinds existed and must not change.
 func (d backupDestinationTarget) associatedData(field string) string {
-	bound, _ := json.Marshal([]string{d.kind, d.endpoint, d.region, d.bucket, d.prefix})
+	fields := []string{d.kind, d.endpoint, d.region, d.bucket, d.prefix}
+	if d.kind != BackupDestinationKindS3 {
+		fields = []string{d.kind, d.clientID, d.folder}
+	}
+	bound, _ := json.Marshal(fields)
 	return "engram-backup-destination:v1:" + field + ":" + string(bound)
+}
+
+// sealedBackupDestination is a stored destination row: the target, its
+// ciphertexts (empty for the columns its kind does not use) and the hint and
+// fingerprint shown in the non-secret view.
+type sealedBackupDestination struct {
+	target                               backupDestinationTarget
+	accessKeyIDHint                      string
+	accessCipher, secretCipher           string
+	clientSecretCipher, refreshTokCipher string
+	fingerprint                          string
 }
 
 // GetBackupDestination returns the non-secret destination view without
@@ -142,14 +193,24 @@ func (cs *CloudStore) GetBackupDestination(ctx context.Context) (BackupDestinati
 		return BackupDestination{}, fmt.Errorf("cloudstore: not initialized")
 	}
 	var d BackupDestination
+	var clientID, folder string
+	var authorized bool
 	err := cs.db.QueryRowContext(ctx, `
-		SELECT kind, endpoint, region, bucket, prefix, access_key_id_hint, key_fingerprint, COALESCE(updated_by_principal_id::text, ''), updated_at
-		FROM cloud_backup_destinations WHERE id = 1`).Scan(&d.Kind, &d.Endpoint, &d.Region, &d.Bucket, &d.Prefix, &d.AccessKeyIDHint, &d.KeyFingerprint, &d.UpdatedByPrincipalID, &d.UpdatedAt)
+		SELECT kind, endpoint, region, bucket, prefix, access_key_id_hint, key_fingerprint, COALESCE(updated_by_principal_id::text, ''), updated_at,
+			client_id, folder, refresh_token_ciphertext <> ''
+		FROM cloud_backup_destinations WHERE id = 1`).Scan(&d.Kind, &d.Endpoint, &d.Region, &d.Bucket, &d.Prefix, &d.AccessKeyIDHint, &d.KeyFingerprint, &d.UpdatedByPrincipalID, &d.UpdatedAt,
+		&clientID, &folder, &authorized)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BackupDestination{}, nil
 	}
 	if err != nil {
 		return BackupDestination{}, fmt.Errorf("cloudstore: read backup destination: %w", err)
+	}
+	switch d.Kind {
+	case BackupDestinationKindDropbox:
+		d.Dropbox = DropboxDestinationView{AppKey: clientID, FolderPath: folder}
+	case BackupDestinationKindGDrive:
+		d.GDrive = GDriveDestinationView{ClientID: clientID, FolderName: folder, Authorized: authorized}
 	}
 	d.Configured = true
 	return d, nil
@@ -211,35 +272,48 @@ func (cs *CloudStore) PutBackupDestination(ctx context.Context, params PutBackup
 	}
 	hint := backupAccessKeyIDHint(accessKeyID)
 	fingerprint := sealer.Fingerprint()
+	row := sealedBackupDestination{target: target, accessKeyIDHint: hint, accessCipher: accessCipher, secretCipher: secretCipher, fingerprint: fingerprint}
+	// Metadata is built here, never from caller input, so it cannot carry a
+	// credential or ciphertext.
+	return cs.storeBackupDestination(ctx, row, params.Actor, map[string]any{
+		"kind": target.kind, "endpoint": target.endpoint, "region": target.region, "bucket": target.bucket, "prefix": target.prefix,
+		"access_key_id_hint": hint, "key_fingerprint": fingerprint,
+	})
+}
 
+// storeBackupDestination replaces the single destination row with row, every
+// column included so no setting of a previous kind survives, and records the
+// backup.destination.update audit row with metadata in the same transaction.
+// An audit failure rolls the destination back.
+func (cs *CloudStore) storeBackupDestination(ctx context.Context, row sealedBackupDestination, actor BackupDestinationActor, metadata map[string]any) error {
+	t := row.target
 	tx, err := cs.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("cloudstore: begin backup destination tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO cloud_backup_destinations (id, kind, endpoint, region, bucket, prefix, access_key_id_hint, access_key_id_ciphertext, secret_access_key_ciphertext, key_fingerprint, updated_by_principal_id, updated_at)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+		INSERT INTO cloud_backup_destinations (id, kind, endpoint, region, bucket, prefix, access_key_id_hint, access_key_id_ciphertext, secret_access_key_ciphertext,
+			client_id, folder, client_secret_ciphertext, refresh_token_ciphertext, key_fingerprint, updated_by_principal_id, updated_at)
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
 		ON CONFLICT (id) DO UPDATE SET
 			kind = EXCLUDED.kind, endpoint = EXCLUDED.endpoint, region = EXCLUDED.region, bucket = EXCLUDED.bucket, prefix = EXCLUDED.prefix,
 			access_key_id_hint = EXCLUDED.access_key_id_hint, access_key_id_ciphertext = EXCLUDED.access_key_id_ciphertext,
-			secret_access_key_ciphertext = EXCLUDED.secret_access_key_ciphertext, key_fingerprint = EXCLUDED.key_fingerprint,
+			secret_access_key_ciphertext = EXCLUDED.secret_access_key_ciphertext,
+			client_id = EXCLUDED.client_id, folder = EXCLUDED.folder, client_secret_ciphertext = EXCLUDED.client_secret_ciphertext,
+			refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext, key_fingerprint = EXCLUDED.key_fingerprint,
 			updated_by_principal_id = EXCLUDED.updated_by_principal_id, updated_at = EXCLUDED.updated_at`,
-		target.kind, target.endpoint, target.region, target.bucket, target.prefix, hint, accessCipher, secretCipher, fingerprint, nullableID(params.Actor.PrincipalID),
+		t.kind, t.endpoint, t.region, t.bucket, t.prefix, row.accessKeyIDHint, row.accessCipher, row.secretCipher,
+		t.clientID, t.folder, row.clientSecretCipher, row.refreshTokCipher, row.fingerprint, nullableID(actor.PrincipalID),
 	); err != nil {
 		return fmt.Errorf("cloudstore: store backup destination: %w", err)
 	}
-	// Metadata is built here, never from caller input, so it cannot carry a
-	// credential or ciphertext.
 	audit := AuthAuditEvent{
-		ActorPrincipalID: params.Actor.PrincipalID,
-		ActorSource:      params.Actor.Source,
+		ActorPrincipalID: actor.PrincipalID,
+		ActorSource:      actor.Source,
 		Action:           AuthAuditActionBackupDestinationUpdate,
 		Outcome:          "success",
-		Metadata: map[string]any{
-			"kind": target.kind, "endpoint": target.endpoint, "region": target.region, "bucket": target.bucket, "prefix": target.prefix,
-			"access_key_id_hint": hint, "key_fingerprint": fingerprint,
-		},
+		Metadata:         metadata,
 	}
 	if err := insertAuthAuditEvent(ctx, tx, audit); err != nil {
 		return fmt.Errorf("%w: %w", ErrAuthAuditInsertFailed, err)
@@ -250,8 +324,9 @@ func (cs *CloudStore) PutBackupDestination(ctx context.Context, params PutBackup
 	return nil
 }
 
-// ClearBackupDestination removes the destination and audits it in one
-// transaction. Clearing an absent destination is audited with removed=false.
+// ClearBackupDestination removes the destination of any kind and audits it
+// in one transaction, naming the removed kind. Clearing an absent
+// destination is audited with removed=false.
 func (cs *CloudStore) ClearBackupDestination(ctx context.Context, actor BackupDestinationActor) error {
 	if cs == nil || cs.db == nil {
 		return fmt.Errorf("cloudstore: not initialized")
@@ -261,20 +336,21 @@ func (cs *CloudStore) ClearBackupDestination(ctx context.Context, actor BackupDe
 		return fmt.Errorf("cloudstore: begin backup destination clear tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `DELETE FROM cloud_backup_destinations WHERE id = 1`)
-	if err != nil {
+	var kind string
+	err = tx.QueryRowContext(ctx, `DELETE FROM cloud_backup_destinations WHERE id = 1 RETURNING kind`).Scan(&kind)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("cloudstore: clear backup destination: %w", err)
 	}
-	removed, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("cloudstore: clear backup destination: %w", err)
+	metadata := map[string]any{"removed": kind != ""}
+	if kind != "" {
+		metadata["kind"] = kind
 	}
 	audit := AuthAuditEvent{
 		ActorPrincipalID: actor.PrincipalID,
 		ActorSource:      actor.Source,
 		Action:           AuthAuditActionBackupDestinationClear,
 		Outcome:          "success",
-		Metadata:         map[string]any{"removed": removed > 0},
+		Metadata:         metadata,
 	}
 	if err := insertAuthAuditEvent(ctx, tx, audit); err != nil {
 		return fmt.Errorf("%w: %w", ErrAuthAuditInsertFailed, err)
@@ -285,32 +361,85 @@ func (cs *CloudStore) ClearBackupDestination(ctx context.Context, actor BackupDe
 	return nil
 }
 
-// OpenBackupDestinationCredentials returns the destination with its opened
-// credentials. It is meant only for the uploader; a wrong or rotated key
-// surfaces the opener's key-mismatch error.
+// OpenBackupDestinationCredentials returns the s3 destination with its
+// opened credentials. It is meant only for the uploader and the S3
+// connection test; a wrong or rotated key surfaces the opener's key-mismatch
+// error, and a destination of another kind wraps
+// ErrBackupDestinationKindMismatch without opening anything.
 func (cs *CloudStore) OpenBackupDestinationCredentials(ctx context.Context, opener BackupSecretOpener) (BackupDestinationCredentials, error) {
+	row, err := cs.readSealedBackupDestination(ctx, opener)
+	if err != nil {
+		return BackupDestinationCredentials{}, err
+	}
+	if row.target.kind != BackupDestinationKindS3 {
+		return BackupDestinationCredentials{}, fmt.Errorf("%w: it is a %s destination, not s3", ErrBackupDestinationKindMismatch, row.target.kind)
+	}
+	return openS3BackupDestination(row, opener)
+}
+
+// OpenBackupDestination returns the destination of any kind with its opened
+// secrets, for the uploader only. A Google Drive destination pending
+// authorization opens with an empty refresh token
+// (GDriveDestinationCredentials.Authorized reports false).
+func (cs *CloudStore) OpenBackupDestination(ctx context.Context, opener BackupSecretOpener) (OpenedBackupDestination, error) {
+	row, err := cs.readSealedBackupDestination(ctx, opener)
+	if err != nil {
+		return OpenedBackupDestination{}, err
+	}
+	switch row.target.kind {
+	case BackupDestinationKindS3:
+		creds, err := openS3BackupDestination(row, opener)
+		if err != nil {
+			return OpenedBackupDestination{}, err
+		}
+		return OpenedBackupDestination{Kind: BackupDestinationKindS3, S3: creds}, nil
+	case BackupDestinationKindDropbox:
+		creds, err := openDropboxBackupDestination(row, opener)
+		if err != nil {
+			return OpenedBackupDestination{}, err
+		}
+		return OpenedBackupDestination{Kind: BackupDestinationKindDropbox, Dropbox: creds}, nil
+	case BackupDestinationKindGDrive:
+		creds, err := openGDriveBackupDestination(row, opener)
+		if err != nil {
+			return OpenedBackupDestination{}, err
+		}
+		return OpenedBackupDestination{Kind: BackupDestinationKindGDrive, GDrive: creds}, nil
+	}
+	return OpenedBackupDestination{}, fmt.Errorf("%w: unknown kind %q", ErrBackupDestinationKindMismatch, row.target.kind)
+}
+
+// readSealedBackupDestination reads the stored row without opening it.
+func (cs *CloudStore) readSealedBackupDestination(ctx context.Context, opener BackupSecretOpener) (sealedBackupDestination, error) {
 	if cs == nil || cs.db == nil {
-		return BackupDestinationCredentials{}, fmt.Errorf("cloudstore: not initialized")
+		return sealedBackupDestination{}, fmt.Errorf("cloudstore: not initialized")
 	}
 	if isNilBackupKeyHolder(opener) {
-		return BackupDestinationCredentials{}, ErrBackupDestinationKeyRequired
+		return sealedBackupDestination{}, ErrBackupDestinationKeyRequired
 	}
-	var target backupDestinationTarget
-	var accessCipher, secretCipher string
+	var row sealedBackupDestination
+	t := &row.target
 	err := cs.db.QueryRowContext(ctx, `
-		SELECT kind, endpoint, region, bucket, prefix, access_key_id_ciphertext, secret_access_key_ciphertext
-		FROM cloud_backup_destinations WHERE id = 1`).Scan(&target.kind, &target.endpoint, &target.region, &target.bucket, &target.prefix, &accessCipher, &secretCipher)
+		SELECT kind, endpoint, region, bucket, prefix, access_key_id_ciphertext, secret_access_key_ciphertext,
+			client_id, folder, client_secret_ciphertext, refresh_token_ciphertext, key_fingerprint
+		FROM cloud_backup_destinations WHERE id = 1`).Scan(&t.kind, &t.endpoint, &t.region, &t.bucket, &t.prefix, &row.accessCipher, &row.secretCipher,
+		&t.clientID, &t.folder, &row.clientSecretCipher, &row.refreshTokCipher, &row.fingerprint)
 	if errors.Is(err, sql.ErrNoRows) {
-		return BackupDestinationCredentials{}, ErrBackupDestinationNotConfigured
+		return sealedBackupDestination{}, ErrBackupDestinationNotConfigured
 	}
 	if err != nil {
-		return BackupDestinationCredentials{}, fmt.Errorf("cloudstore: read backup destination: %w", err)
+		return sealedBackupDestination{}, fmt.Errorf("cloudstore: read backup destination: %w", err)
 	}
-	accessKeyID, err := opener.Open(target.associatedData(backupDestinationFieldAccessKeyID), accessCipher)
+	return row, nil
+}
+
+func openS3BackupDestination(row sealedBackupDestination, opener BackupSecretOpener) (BackupDestinationCredentials, error) {
+	target := row.target
+	accessKeyID, err := opener.Open(target.associatedData(backupDestinationFieldAccessKeyID), row.accessCipher)
 	if err != nil {
 		return BackupDestinationCredentials{}, fmt.Errorf("cloudstore: open backup destination access key id: %w", err)
 	}
-	secret, err := opener.Open(target.associatedData(backupDestinationFieldSecretAccessKey), secretCipher)
+	secret, err := opener.Open(target.associatedData(backupDestinationFieldSecretAccessKey), row.secretCipher)
 	if err != nil {
 		return BackupDestinationCredentials{}, fmt.Errorf("cloudstore: open backup destination secret access key: %w", err)
 	}

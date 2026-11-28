@@ -59,6 +59,11 @@ type BackupRunner interface {
 // a run while another one is running.
 var ErrBackupAlreadyRunning = errors.New("a backup is already running")
 
+// ErrBackupDestinationUnsupported is returned by a BackupRunner that refuses
+// to start a run because this server cannot upload to the configured kind of
+// destination yet.
+var ErrBackupDestinationUnsupported = errors.New("the backup destination is not supported")
+
 // WithBackupSettings wires the backup settings store and the backup key. A
 // nil key means ENGRAM_CLOUD_BACKUP_KEY is not set: the page explains it and
 // renders no settings form, and the routes that need the key refuse.
@@ -100,6 +105,12 @@ const (
 	backupReasonNotConfigured      = "not_configured"
 	backupReasonAlreadyRunning     = "already_running"
 	backupReasonRunnerError        = "runner_error"
+	// backupReasonUnsupportedKind fails a connection test of a destination
+	// kind the test route cannot check yet (Dropbox, Google Drive).
+	backupReasonUnsupportedKind = "unsupported_kind"
+	// backupReasonUnsupportedDestination refuses a manual run of a
+	// destination kind the runner cannot upload to yet.
+	backupReasonUnsupportedDestination = "unsupported_destination"
 	// backupReasonInvalidDestination is the reason code of a
 	// backup.destination.check refused by validation.
 	backupReasonInvalidDestination = "invalid_destination"
@@ -118,9 +129,62 @@ var backupNotices = map[string]dashboard.BackupsNotice{
 	"test-error":          {Kind: "danger", Title: "Unexpected response.", Message: "Connection test failed: the destination returned an unexpected response.", Destination: true},
 	"test-key":            {Kind: "danger", Title: "Credentials cannot be opened.", Message: "Connection test failed: the stored credentials cannot be opened with the current ENGRAM_CLOUD_BACKUP_KEY. Save the destination again.", Destination: true},
 	"test-none":           {Kind: "danger", Title: "No destination.", Message: "Connection test failed: no backup destination is configured.", Destination: true},
+	"test-unsupported":    {Kind: "danger", Title: "Not available.", Message: "Connection test is not available for this kind of destination yet.", Destination: true},
 	"run-started":         {Kind: "success", Message: "Backup started. Its result appears in the run history."},
 	"run-busy":            {Kind: "danger", Message: "A backup is already running; wait for it to finish."},
 	"run-failed":          {Kind: "danger", Message: "The backup could not be started. Check the server log."},
+	"run-unsupported":     {Kind: "danger", Message: "This server cannot upload to this kind of destination yet; no backup was started."},
+}
+
+// backupKindNotice describes a stored destination of a kind the dashboard
+// has no form for yet (Dropbox, Google Drive) with its non-secret settings;
+// the OAuth client identifier shows only its last characters. It is empty
+// for an s3 destination.
+func backupKindNotice(d cloudstore.BackupDestination) dashboard.BackupsNotice {
+	var title, detail string
+	switch d.Kind {
+	case cloudstore.BackupDestinationKindDropbox:
+		title = "Dropbox destination."
+		detail = "folder " + d.Dropbox.FolderPath + ", app key " + backupClientIDHint(d.Dropbox.AppKey)
+	case cloudstore.BackupDestinationKindGDrive:
+		state := "pending authorization"
+		if d.GDrive.Authorized {
+			state = "authorized"
+		}
+		title = "Google Drive destination."
+		detail = "folder " + d.GDrive.FolderName + ", client id " + backupClientIDHint(d.GDrive.ClientID) + ", " + state
+	default:
+		return dashboard.BackupsNotice{}
+	}
+	return dashboard.BackupsNotice{
+		Kind:        "danger",
+		Title:       title,
+		Message:     "Stored destination: " + detail + ". This dashboard cannot edit or test this kind of destination yet; remove it to configure an S3-compatible bucket.",
+		Destination: true,
+	}
+}
+
+// backupKindSummary maps a non-s3 destination onto the fields the status
+// card renders: the folder in place of the bucket and the client
+// identifier hint in place of the access key id hint. The S3 fields stay
+// empty, so the Change destination form is not pre-filled with them.
+func backupKindSummary(d cloudstore.BackupDestination) cloudstore.BackupDestination {
+	switch d.Kind {
+	case cloudstore.BackupDestinationKindDropbox:
+		d.Bucket, d.AccessKeyIDHint = d.Dropbox.FolderPath, backupClientIDHint(d.Dropbox.AppKey)
+	case cloudstore.BackupDestinationKindGDrive:
+		d.Bucket, d.AccessKeyIDHint = d.GDrive.FolderName, backupClientIDHint(d.GDrive.ClientID)
+	}
+	return d
+}
+
+// backupClientIDHint keeps the last four characters of a long OAuth client
+// identifier and nothing of a short one.
+func backupClientIDHint(id string) string {
+	if len(id) < 12 {
+		return "****"
+	}
+	return "****" + id[len(id)-4:]
 }
 
 // checkBackupDestinationAccess is the default "Test connection" check: a
@@ -170,7 +234,11 @@ func (s *CloudServer) renderBackupsPageWithCheck(w http.ResponseWriter, r *http.
 
 // renderBackupsPageView renders view with status and notice.
 func (s *CloudServer) renderBackupsPageView(w http.ResponseWriter, r *http.Request, status int, view dashboard.BackupsPageView, notice dashboard.BackupsNotice) {
-	view.Notice = notice
+	// A request's own notice wins over the notice describing the stored
+	// destination's kind (backupKindNotice).
+	if notice.Kind != "" || view.Notice.Kind == "" {
+		view.Notice = notice
+	}
 	if view.Settings == dashboard.BackupSettingsUnavailable && status == http.StatusOK {
 		status = http.StatusBadGateway
 	}
@@ -211,6 +279,10 @@ func (s *CloudServer) backupsPageView(r *http.Request) dashboard.BackupsPageView
 		return dashboard.BackupsPageView{CanManage: view.CanManage, Tables: view.Tables, Exclusions: view.Exclusions, Settings: dashboard.BackupSettingsUnavailable}
 	}
 	view.Destination = destination
+	if destination.Configured && destination.Kind != cloudstore.BackupDestinationKindS3 {
+		view.Destination = backupKindSummary(destination)
+		view.Notice = backupKindNotice(destination)
+	}
 	view.Now = s.backupClock()
 	view.Settings = dashboard.BackupSettingsKeyMissing
 	if s.backupKey != nil {
@@ -365,6 +437,8 @@ func (s *CloudServer) handleDashboardTestBackupDestination(w http.ResponseWriter
 		notice, reason = "test-none", backupReasonNotConfigured
 	case errors.Is(err, backupcrypto.ErrKeyMismatch), errors.Is(err, backupcrypto.ErrSealedValueInvalid):
 		notice, reason = "test-key", backupReasonKeyMismatch
+	case errors.Is(err, cloudstore.ErrBackupDestinationKindMismatch):
+		notice, reason = "test-unsupported", backupReasonUnsupportedKind
 	case err != nil:
 		log.Printf("[engram-cloud] backup destination test failed to read the destination: actor=%q: %v", actor.ID, err)
 		http.Error(w, "test backup destination failed", http.StatusInternalServerError)
@@ -609,8 +683,11 @@ func (s *CloudServer) handleDashboardBackupNow(w http.ResponseWriter, r *http.Re
 		return
 	}
 	notice, reason := "run-failed", backupReasonRunnerError
-	if errors.Is(err, ErrBackupAlreadyRunning) {
+	switch {
+	case errors.Is(err, ErrBackupAlreadyRunning):
 		notice, reason = "run-busy", backupReasonAlreadyRunning
+	case errors.Is(err, ErrBackupDestinationUnsupported):
+		notice, reason = "run-unsupported", backupReasonUnsupportedDestination
 	}
 	log.Printf("[engram-cloud] manual backup not started: actor=%q: %v", actor.ID, err)
 	failed := adminAuditEvent(actor, authAuditActionBackupRunManual, "", "", map[string]any{"trigger": cloudstore.BackupRunTriggerManual})
