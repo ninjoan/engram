@@ -290,7 +290,7 @@ const opTokenRefresh = "TokenRefresh"
 // share one refresh at a time; each waiter stops waiting as soon as its own
 // ctx ends. The refresh runs on a context detached from the caller that
 // started it (so its cancellation never fails the other waiters), bounded
-// by the request timeout.
+// by refreshBudget.
 func (c *Client) accessToken(ctx context.Context) (string, error) {
 	c.tok.mu.Lock()
 	if c.tok.access != "" && c.now().Before(c.tok.expiry) {
@@ -317,14 +317,24 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 	}
 }
 
+// refreshBudget bounds one shared refresh: every attempt the retry loop in
+// do may make (each already bounded by requestTimeout) plus the longest
+// backoff between them, so a single hung attempt is retried rather than
+// ending the refresh.
+func (c *Client) refreshBudget() time.Duration {
+	attempts := time.Duration(c.maxRetries + 1)
+	return attempts*c.requestTimeout + time.Duration(c.maxRetries)*c.backoffMax
+}
+
 // runRefresh performs flight f and caches its token.
 func (c *Client) runRefresh(base context.Context, f *tokenFlight) {
-	ctx, cancel := context.WithTimeout(base, c.requestTimeout)
+	budget := c.refreshBudget()
+	ctx, cancel := context.WithTimeout(base, budget)
 	defer cancel()
 	tok, ttl, err := c.refresh(ctx)
 	if err != nil && ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded) {
 		// The refresh's own bound, not a caller's deadline.
-		err = &Error{Op: opTokenRefresh, Kind: ErrNetwork, Err: &timeoutError{msg: fmt.Sprintf("token refresh timed out after %s", c.requestTimeout)}}
+		err = &Error{Op: opTokenRefresh, Kind: ErrNetwork, Err: &timeoutError{msg: fmt.Sprintf("token refresh timed out after %s", budget)}}
 	}
 	c.tok.mu.Lock()
 	if err == nil {

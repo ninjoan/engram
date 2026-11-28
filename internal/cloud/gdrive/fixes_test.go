@@ -662,3 +662,24 @@ func TestTokenEndpointEchoIsRedacted(t *testing.T) {
 		}
 	}
 }
+
+// A token request that hangs past one attempt's timeout must be retried
+// inside the shared refresh, not end the whole refresh.
+func TestTokenRefreshRetriesAfterAHungAttempt(t *testing.T) {
+	fd := newFakeDrive(t)
+	fd.token = func(_ http.ResponseWriter, r *http.Request, _ []byte, n int, _ *session) bool {
+		if n == 1 {
+			<-r.Context().Done() // hang until this attempt's own timeout
+			return true
+		}
+		return false
+	}
+	c, _ := newTestClient(t, fd)
+	c.requestTimeout = 150 * time.Millisecond
+	if _, err := c.accessToken(context.Background()); err != nil {
+		t.Fatalf("refresh after one hung attempt failed: %v", err)
+	}
+	if got := fd.count("token"); got != 2 {
+		t.Fatalf("token requests = %d, want 2 (hung attempt + retry)", got)
+	}
+}
