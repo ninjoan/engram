@@ -2976,3 +2976,144 @@ details.tech-details > summary:hover {
 		animation: none;
 	}
 }
+
+/* Storage choice (S3-compatible, Dropbox, Google Drive): a segmented row of
+   plain links, like the admin sub-nav, above the destination form. */
+
+.backup-storage-pick {
+	margin: 0.85rem 0 1rem;
+}
+
+.backup-storage-label {
+	margin: 0 0 0.35rem;
+	color: var(--engram-muted);
+	font-size: 0.84rem;
+	font-weight: 600;
+}
+
+.backup-storage-options {
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 2px;
+	padding: 3px;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-full);
+	background: var(--engram-surface);
+}
+
+.backup-storage-options a {
+	display: inline-flex;
+	align-items: center;
+	min-height: 2.25rem;
+	padding: 0.45rem 1rem;
+	border-radius: var(--shape-full);
+	color: var(--engram-muted);
+	font-size: 0.85rem;
+	line-height: 1.2;
+	text-decoration: none;
+	transition: color 150ms ease, background 150ms ease;
+}
+
+.backup-storage-options a:hover {
+	color: var(--engram-text);
+}
+
+.backup-storage-options a.active {
+	background: var(--engram-primary);
+	color: var(--st-base);
+	font-weight: 600;
+}
+
+.backup-storage-pick > .hint {
+	display: block;
+	margin: 0.35rem 0 0;
+}
+
+/* Google Drive until its OAuth flow exists: text only. */
+
+.backup-coming {
+	margin: 0 0 0.5rem;
+	padding: 0.8rem 1.1rem;
+	border-left: 2px solid var(--engram-info);
+	border-radius: var(--shape-medium);
+	background: var(--tm-surface);
+	color: var(--engram-text-soft);
+}
+
+.backup-coming p {
+	margin: 0;
+}
+
+/* Dropbox form: collapsed setup guide and the Save / Test actions. */
+
+details.backup-help {
+	margin: 1rem 0 0;
+	padding-top: 0.5rem;
+	border-top: 1px solid var(--tm-border-soft);
+	border-bottom: 0;
+}
+
+details.backup-help > summary {
+	display: flex;
+	align-items: center;
+	min-height: 2.75rem;
+	color: var(--engram-primary);
+	font-size: 0.9rem;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+details.backup-help > summary:hover {
+	color: var(--engram-primary-hover);
+}
+
+.backup-help-steps {
+	margin: 0.5rem 0 0;
+	padding-left: 1.25rem;
+	color: var(--engram-text-soft);
+	font-size: 0.9rem;
+	line-height: 1.6;
+}
+
+.backup-help-steps li + li {
+	margin-top: 0.5rem;
+}
+
+.backup-help-code {
+	margin: 0.5rem 0;
+	padding: 0.65rem 0.85rem;
+	overflow-x: auto;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-medium);
+	background: var(--engram-surface);
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+	white-space: pre;
+}
+
+.backup-help-code code {
+	padding: 0;
+	background: transparent;
+	overflow-wrap: anywhere;
+}
+
+/* Save is first in the DOM (Enter saves); Test connection shows first. */
+.backup-dropbox-actions {
+	display: flex;
+	flex-direction: row-reverse;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+}
+
+.backup-dropbox-actions button {
+	width: auto;
+	margin: 0;
+}
+
+@media (max-width: 560px) {
+	.backup-dropbox-actions {
+		flex-direction: column;
+		align-items: stretch;
+	}
+}

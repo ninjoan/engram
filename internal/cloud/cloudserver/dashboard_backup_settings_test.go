@@ -53,6 +53,12 @@ type fakeBackupSettingsStore struct {
 	latestTest  cloudstore.BackupDestinationTest
 	outcomes    cloudstore.BackupRunOutcomes
 	statusErr   error
+	// dropboxCreds and gdriveCreds are opened for a destination of that kind.
+	dropboxCreds cloudstore.DropboxDestinationCredentials
+	gdriveCreds  cloudstore.GDriveDestinationCredentials
+
+	putDropbox    []cloudstore.PutDropboxDestinationParams
+	putDropboxErr error
 
 	putDestination    []cloudstore.PutBackupDestinationParams
 	putSealers        []cloudstore.BackupSecretSealer
@@ -92,20 +98,47 @@ func (f *fakeBackupSettingsStore) ClearBackupDestination(_ context.Context, acto
 	return nil
 }
 
-func (f *fakeBackupSettingsStore) OpenBackupDestinationCredentials(_ context.Context, opener cloudstore.BackupSecretOpener) (cloudstore.BackupDestinationCredentials, error) {
+// PutDropboxDestination validates like the real store and records the
+// destination it would seal.
+func (f *fakeBackupSettingsStore) PutDropboxDestination(_ context.Context, params cloudstore.PutDropboxDestinationParams, sealer cloudstore.BackupSecretSealer) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.putDropbox = append(f.putDropbox, params)
+	f.putSealers = append(f.putSealers, sealer)
+	if f.putDropboxErr != nil {
+		return f.putDropboxErr
+	}
+	creds, err := cloudstore.ValidateDropboxDestination(params)
+	if err != nil {
+		return err
+	}
+	f.destination = cloudstore.BackupDestination{Configured: true, Kind: cloudstore.BackupDestinationKindDropbox, Dropbox: cloudstore.DropboxDestinationView{AppKey: creds.AppKey, FolderPath: creds.FolderPath}}
+	f.dropboxCreds = creds
+	return nil
+}
+
+// OpenBackupDestination opens the stored destination of any kind: creds
+// for s3, dropboxCreds and gdriveCreds for the other kinds.
+func (f *fakeBackupSettingsStore) OpenBackupDestination(_ context.Context, opener cloudstore.BackupSecretOpener) (cloudstore.OpenedBackupDestination, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.opens++
 	if opener == nil {
-		return cloudstore.BackupDestinationCredentials{}, cloudstore.ErrBackupDestinationKeyRequired
+		return cloudstore.OpenedBackupDestination{}, cloudstore.ErrBackupDestinationKeyRequired
 	}
 	if f.openErr != nil {
-		return cloudstore.BackupDestinationCredentials{}, f.openErr
+		return cloudstore.OpenedBackupDestination{}, f.openErr
 	}
 	if !f.destination.Configured {
-		return cloudstore.BackupDestinationCredentials{}, cloudstore.ErrBackupDestinationNotConfigured
+		return cloudstore.OpenedBackupDestination{}, cloudstore.ErrBackupDestinationNotConfigured
 	}
-	return f.creds, nil
+	switch f.destination.Kind {
+	case cloudstore.BackupDestinationKindDropbox:
+		return cloudstore.OpenedBackupDestination{Kind: cloudstore.BackupDestinationKindDropbox, Dropbox: f.dropboxCreds}, nil
+	case cloudstore.BackupDestinationKindGDrive:
+		return cloudstore.OpenedBackupDestination{Kind: cloudstore.BackupDestinationKindGDrive, GDrive: f.gdriveCreds}, nil
+	}
+	return cloudstore.OpenedBackupDestination{Kind: cloudstore.BackupDestinationKindS3, S3: f.creds}, nil
 }
 
 func (f *fakeBackupSettingsStore) GetBackupSchedule(context.Context) (cloudstore.BackupSchedule, error) {
@@ -157,7 +190,7 @@ func (f *fakeBackupSettingsStore) LatestBackupRunOutcomes(context.Context) (clou
 func (f *fakeBackupSettingsStore) mutations() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.putDestination) + len(f.clears) + f.opens + len(f.putSchedule)
+	return len(f.putDestination) + len(f.putDropbox) + len(f.clears) + f.opens + len(f.putSchedule)
 }
 
 type fakeBackupRunner struct {
@@ -216,12 +249,29 @@ func configuredBackupSettings() *fakeBackupSettingsStore {
 	}
 }
 
+// fakeDropboxChecker is the Dropbox access check of the test and check
+// routes; it never reaches the network.
+type fakeDropboxChecker struct {
+	calls       int
+	err         error
+	creds       cloudstore.DropboxDestinationCredentials
+	hadDeadline bool
+}
+
+func (f *fakeDropboxChecker) check(ctx context.Context, creds cloudstore.DropboxDestinationCredentials) error {
+	f.calls++
+	f.creds = creds
+	_, f.hadDeadline = ctx.Deadline()
+	return f.err
+}
+
 type backupSettingsFixture struct {
 	srv      *CloudServer
 	audit    *loginAuditTestStore
 	settings *fakeBackupSettingsStore
 	runner   *fakeBackupRunner
 	checker  *fakeBackupChecker
+	dropbox  *fakeDropboxChecker
 	exporter *fakeBackupExporter
 	cookie   *http.Cookie
 }
@@ -230,10 +280,11 @@ type backupSettingsFixture struct {
 // the dashboard session helpers.
 func wireBackupFixture(t *testing.T, srv *CloudServer, audit *loginAuditTestStore, cookie *http.Cookie, settings *fakeBackupSettingsStore) backupSettingsFixture {
 	t.Helper()
-	f := backupSettingsFixture{srv: srv, audit: audit, settings: settings, runner: &fakeBackupRunner{}, checker: &fakeBackupChecker{}, exporter: &fakeBackupExporter{write: []byte("archive-bytes")}, cookie: cookie}
+	f := backupSettingsFixture{srv: srv, audit: audit, settings: settings, runner: &fakeBackupRunner{}, checker: &fakeBackupChecker{}, dropbox: &fakeDropboxChecker{}, exporter: &fakeBackupExporter{write: []byte("archive-bytes")}, cookie: cookie}
 	WithBackupSettings(settings, testBackupKey(t))(srv)
 	WithBackupRunner(f.runner)(srv)
 	srv.backupCheckAccess = f.checker.check
+	srv.backupCheckDropbox = f.dropbox.check
 	srv.backupExport = f.exporter.export
 	srv.backupNow = func() time.Time { return time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC) }
 	return f

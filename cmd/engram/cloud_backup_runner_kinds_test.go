@@ -12,16 +12,11 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 )
 
-// cloud serve wires only the S3 uploader so far: a stored Dropbox or Google
-// Drive destination refuses a manual run without recording one.
+// cloud serve wires the S3 and Dropbox uploaders; Google Drive is not wired
+// yet: a stored Google Drive destination refuses a manual run without
+// recording one.
 func TestBackupRunnerRuntimeRefusesUnwiredDestinationKinds(t *testing.T) {
 	for name, put := range map[string]func(context.Context, *cloudstore.CloudStore, *backupcrypto.Sealer) error{
-		cloudstore.BackupDestinationKindDropbox: func(ctx context.Context, cs *cloudstore.CloudStore, sealer *backupcrypto.Sealer) error {
-			return cs.PutDropboxDestination(ctx, cloudstore.PutDropboxDestinationParams{
-				AppKey: "cmdrunnerappkey", FolderPath: "/Engram backups", AppSecret: "cmd-app-secret", RefreshToken: "cmd-refresh-token",
-				Actor: cloudstore.BackupDestinationActor{Source: "test"},
-			}, sealer)
-		},
 		cloudstore.BackupDestinationKindGDrive: func(ctx context.Context, cs *cloudstore.CloudStore, sealer *backupcrypto.Sealer) error {
 			return cs.PutGDriveDestination(ctx, cloudstore.PutGDriveDestinationParams{
 				ClientID: "cmd.apps.googleusercontent.com", FolderName: "Engram backups", ClientSecret: "cmd-client-secret",
@@ -61,5 +56,23 @@ func TestBackupRunnerRuntimeRefusesUnwiredDestinationKinds(t *testing.T) {
 				t.Fatalf("runs = %+v, %v; want none", runs, err)
 			}
 		})
+	}
+}
+
+// The runner config of cloud serve wires the Dropbox uploader (built
+// without any network call) and leaves Google Drive unwired until its OAuth
+// flow exists.
+func TestBackupRunnerConfigWiresTheDropboxUploader(t *testing.T) {
+	sealer, err := backupcrypto.NewSealer(backupKeyConfigFromEnv(t, cloudBackupRunnerTestKey).BackupKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cloudBackupRunnerConfig(nil, sealer)
+	if cfg.NewS3Client == nil || cfg.NewDropboxUploader == nil || cfg.NewGDriveUploader != nil || cfg.Key == nil || cfg.EngramVersion != version {
+		t.Fatalf("runner config = %+v", cfg)
+	}
+	uploader, err := cfg.NewDropboxUploader(cloudstore.DropboxDestinationCredentials{AppKey: "cmdrunnerappkey", FolderPath: "/Engram backups", AppSecret: "cmd-app-secret", RefreshToken: "cmd-refresh-token"})
+	if err != nil || uploader == nil {
+		t.Fatalf("NewDropboxUploader = %v, %v", uploader, err)
 	}
 }

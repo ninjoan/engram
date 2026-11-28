@@ -95,11 +95,16 @@ type CloudServer struct {
 	// settings routes (dashboard_backup_settings.go). backupCheckAccess
 	// overrides the destination access check and backupNow the clock used
 	// for the next scheduled run; both are test seams only.
-	backupSettings    BackupSettingsStore
-	backupKey         BackupKey
-	backupRunner      BackupRunner
-	backupCheckAccess func(ctx context.Context, creds cloudstore.BackupDestinationCredentials) error
-	backupNow         func() time.Time
+	// backupCheckDropbox overrides the Dropbox access check and
+	// backupDropboxHTTPClient the HTTP client of the real one; both are
+	// test seams only.
+	backupSettings          BackupSettingsStore
+	backupKey               BackupKey
+	backupRunner            BackupRunner
+	backupCheckAccess       func(ctx context.Context, creds cloudstore.BackupDestinationCredentials) error
+	backupCheckDropbox      func(ctx context.Context, creds cloudstore.DropboxDestinationCredentials) error
+	backupDropboxHTTPClient *http.Client
+	backupNow               func() time.Time
 	// version is the optional running build identifier surfaced in the
 	// dashboard chrome (Layout footer + LoginPage). An empty identifier is
 	// displayed as "version unknown" on both surfaces.

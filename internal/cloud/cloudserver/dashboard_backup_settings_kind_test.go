@@ -9,9 +9,9 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 )
 
-// Until the dashboard has Dropbox and Google Drive forms, a stored
-// destination of those kinds renders the status card with its kind and its
-// non-secret settings, never a 500.
+// A stored Dropbox destination renders its own status card; until the
+// dashboard has a Google Drive form, a Google Drive destination renders the
+// status card with its kind and its non-secret settings, never a 500.
 func TestDashboardBackupsPageRendersNonS3DestinationKinds(t *testing.T) {
 	for name, tc := range map[string]struct {
 		destination cloudstore.BackupDestination
@@ -19,7 +19,7 @@ func TestDashboardBackupsPageRendersNonS3DestinationKinds(t *testing.T) {
 	}{
 		"dropbox": {
 			destination: cloudstore.BackupDestination{Configured: true, Kind: cloudstore.BackupDestinationKindDropbox, Dropbox: cloudstore.DropboxDestinationView{AppKey: "dbxappkey7q4zexample", FolderPath: "/Engram backups"}},
-			want:        []string{"Dropbox destination", "/Engram backups", "****mple"},
+			want:        []string{"Dropbox <span", "/Engram backups", "****mple"},
 		},
 		"gdrive pending": {
 			destination: cloudstore.BackupDestination{Configured: true, Kind: cloudstore.BackupDestinationKindGDrive, GDrive: cloudstore.GDriveDestinationView{ClientID: "1234-abcd.apps.googleusercontent.com", FolderName: "Engram backups"}},
@@ -63,8 +63,8 @@ func TestDashboardBackupsPageRendersNonS3DestinationKinds(t *testing.T) {
 
 func TestDashboardTestBackupConnectionRefusesNonS3Kind(t *testing.T) {
 	f := managedBackupFixture(t)
-	f.settings.destination = cloudstore.BackupDestination{Configured: true, Kind: cloudstore.BackupDestinationKindDropbox, Dropbox: cloudstore.DropboxDestinationView{AppKey: "dbxappkey7q4zexample", FolderPath: "/Engram backups"}}
-	f.settings.openErr = fmt.Errorf("%w: it is a dropbox destination, not s3", cloudstore.ErrBackupDestinationKindMismatch)
+	f.settings.destination = cloudstore.BackupDestination{Configured: true, Kind: cloudstore.BackupDestinationKindGDrive, GDrive: cloudstore.GDriveDestinationView{ClientID: "1234-abcd.apps.googleusercontent.com", FolderName: "Engram backups"}}
+	f.settings.openErr = fmt.Errorf("%w: unknown kind %q", cloudstore.ErrBackupDestinationKindMismatch, "ftp")
 	rec := doBackupRequest(f.srv, backupRequest{method: http.MethodPost, path: backupDestinationTestPath, cookie: f.cookie})
 	if rec.Code != http.StatusSeeOther || dashboardRedirect(rec) != backupsPagePath+"?notice=test-unsupported" {
 		t.Fatalf("expected 303 to test-unsupported, got %d %q", rec.Code, dashboardRedirect(rec))

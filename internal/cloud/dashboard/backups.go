@@ -74,12 +74,32 @@ type BackupScheduleForm struct {
 	Error string
 }
 
+// BackupDropboxForm is the Dropbox destination form as the admin submitted
+// it, re-rendered after a refused save or a check. It never holds a secret:
+// the app secret and refresh token fields always render empty.
+type BackupDropboxForm struct {
+	// Submitted is true when the form re-renders submitted values;
+	// otherwise the folder is pre-filled from the stored Dropbox destination
+	// or the default folder, and the app key starts empty.
+	Submitted  bool
+	AppKey     string
+	FolderPath string
+	// Field names the form field the error is about (app_key, app_secret,
+	// refresh_token or folder_path); empty when the error names none.
+	Field string
+	// Error is the fixed validation reason; it never echoes a value.
+	Error string
+}
+
 // BackupDestinationCheck is the typed result of checking a destination
 // before saving it (POST /dashboard/admin/backups/destination/check). It
 // never holds a credential or a provider's answer.
 type BackupDestinationCheck struct {
-	// Result is ok, auth, bucket, network, error or invalid; empty when no
-	// check ran.
+	// Kind is the checked destination kind; empty means s3.
+	Kind string
+	// Result is ok, auth, bucket, network, error or invalid (S3) or ok,
+	// ok-folder, auth, folder, network, error or invalid (Dropbox); empty
+	// when no check ran.
 	Result string
 	// Field names the form field a validation error is about; empty when
 	// the error is not about a single field.
@@ -116,8 +136,18 @@ type BackupsPageView struct {
 	// LastRuns is the newest successful and the newest failed run.
 	LastRuns cloudstore.BackupRunOutcomes
 	// DestinationCheck is the result of a connection check of submitted,
-	// unsaved fields, shown in the guided setup's last step.
+	// unsaved fields, shown in the guided setup's last step or in the
+	// Dropbox form.
 	DestinationCheck BackupDestinationCheck
+	// StorageKind is the destination kind whose form renders (s3, dropbox
+	// or gdrive); empty or unknown selects the stored destination's kind,
+	// else s3.
+	StorageKind string
+	// StorageKindChosen is true when the admin picked StorageKind
+	// explicitly; it opens Change destination on a configured destination.
+	StorageKindChosen bool
+	// DropboxForm re-renders a refused or checked Dropbox save.
+	DropboxForm BackupDropboxForm
 	// Now is the time relative times are measured from; zero uses the
 	// wall clock.
 	Now time.Time
@@ -471,9 +501,147 @@ func backupFieldAttrs(invalid bool, id string, hint bool) templ.Attributes {
 }
 
 // destinationFormOpen opens the collapsed form of a configured destination
-// when it re-renders a refused save.
+// when it re-renders a refused save or check, or when the admin chose a
+// storage kind.
 func (v BackupsPageView) destinationFormOpen() bool {
-	return v.DestinationForm.Submitted
+	return v.DestinationForm.Submitted || v.DropboxForm.Submitted || v.StorageKindChosen
+}
+
+// backupStorageOption is one option of the storage select.
+type backupStorageOption struct {
+	Kind, Name string
+}
+
+var backupStorageOptions = []backupStorageOption{
+	{Kind: cloudstore.BackupDestinationKindS3, Name: "S3-compatible"},
+	{Kind: cloudstore.BackupDestinationKindDropbox, Name: "Dropbox"},
+	{Kind: cloudstore.BackupDestinationKindGDrive, Name: "Google Drive"},
+}
+
+// backupStorageURL is the page with kind's form, scrolled to the
+// destination frame.
+func backupStorageURL(kind string) string {
+	return "/dashboard/admin/backups?kind=" + url.QueryEscape(kind) + "#backup-destination-title"
+}
+
+// IsBackupStorageKind reports whether kind is an option of the storage
+// choice.
+func IsBackupStorageKind(kind string) bool {
+	for _, o := range backupStorageOptions {
+		if o.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// storageKind is the kind whose form renders: the chosen kind, else the
+// stored destination's kind, else s3.
+func (v BackupsPageView) storageKind() string {
+	if IsBackupStorageKind(v.StorageKind) {
+		return v.StorageKind
+	}
+	if v.Destination.Configured && IsBackupStorageKind(v.Destination.Kind) {
+		return v.Destination.Kind
+	}
+	return cloudstore.BackupDestinationKindS3
+}
+
+// isDropboxDestination is true for a stored Dropbox destination, which the
+// status card describes by its folder and masked app key.
+func (v BackupsPageView) isDropboxDestination() bool {
+	return v.Destination.Configured && v.Destination.Kind == cloudstore.BackupDestinationKindDropbox
+}
+
+// dropboxFormValue is the value a non-secret Dropbox field renders: the
+// submitted value, else the stored folder (the app key starts empty), else
+// the default folder. The secret fields always render empty.
+func (v BackupsPageView) dropboxFormValue(field string) string {
+	form := v.DropboxForm
+	switch {
+	case form.Submitted && field == "app_key":
+		return form.AppKey
+	case form.Submitted && field == "folder_path":
+		return form.FolderPath
+	case field == "folder_path" && v.isDropboxDestination():
+		return v.Destination.Dropbox.FolderPath
+	case field == "folder_path":
+		return cloudstore.DefaultDropboxFolderPath
+	}
+	return ""
+}
+
+func (v BackupsPageView) dropboxFieldError(field string) string {
+	if v.DropboxForm.Submitted && v.DropboxForm.Field == field {
+		return v.DropboxForm.Error
+	}
+	return ""
+}
+
+func (v BackupsPageView) dropboxFieldAttrs(field, id string, hint bool) templ.Attributes {
+	return backupFieldAttrs(v.dropboxFieldError(field) != "", id, hint)
+}
+
+// dropboxSaveRefused is true when the Dropbox form re-renders a refused
+// save; a re-render after a check shows the check result instead.
+func (v BackupsPageView) dropboxSaveRefused() bool {
+	return v.DropboxForm.Submitted && v.DestinationCheck.Result == ""
+}
+
+// dropboxErrorUnplaced is the reason no Dropbox field shows.
+func (v BackupsPageView) dropboxErrorUnplaced() string {
+	switch v.DropboxForm.Field {
+	case "app_key", "app_secret", "refresh_token", "folder_path":
+		return ""
+	}
+	return v.DropboxForm.Error
+}
+
+// dropboxCheckVisible is true when the Dropbox form shows a check result.
+func (v BackupsPageView) dropboxCheckVisible() bool {
+	return v.DestinationCheck.Kind == cloudstore.BackupDestinationKindDropbox && v.DestinationCheck.Result != ""
+}
+
+// backupDropboxFolderPrefix renders a Dropbox folder as the start of a file
+// path: "/Engram backups/", or "/" for the root.
+func backupDropboxFolderPrefix(folder string) string {
+	return strings.TrimRight(strings.TrimSpace(folder), "/") + "/"
+}
+
+// backupDropboxAuthorizeURL is the authorization URL pattern of the
+// offline (refresh token) code flow; APP_KEY is replaced by the admin.
+const backupDropboxAuthorizeURL = "https://www.dropbox.com/oauth2/authorize?client_id=APP_KEY&response_type=code&token_access_type=offline"
+
+// backupDropboxTokenExchange trades the authorization code for a refresh
+// token at the Dropbox token endpoint.
+const backupDropboxTokenExchange = `curl https://api.dropboxapi.com/oauth2/token \
+  -d code=AUTHORIZATION_CODE \
+  -d grant_type=authorization_code \
+  -u APP_KEY:APP_SECRET`
+
+// setupReadyNote says what to have at hand for the chosen storage kind.
+func (v BackupsPageView) setupReadyNote() string {
+	if v.storageKind() == cloudstore.BackupDestinationKindDropbox {
+		return "have your Dropbox app key, app secret and refresh token ready."
+	}
+	return "have your bucket name and an access key pair ready."
+}
+
+// untestedNote is the status line of a destination not tested since it was
+// saved.
+func (v BackupsPageView) untestedNote() string {
+	if v.isDropboxDestination() {
+		return "Not tested since it was saved; the next backup is the first check that the saved credentials reach the Dropbox folder."
+	}
+	return "Not tested since it was saved; the next backup is the first check that the saved keys reach the bucket."
+}
+
+// testedNote ends the status line of a passed test.
+func (v BackupsPageView) testedNote() string {
+	if v.isDropboxDestination() {
+		return " · Dropbox accepted the saved credentials."
+	}
+	return " · the bucket was listed with the saved keys."
 }
 
 // destinationErrorUnplaced is the validation reason that no single field
@@ -511,6 +679,15 @@ var backupTestFailures = map[string]backupDestinationStatus{
 	"unexpected_response": {Title: "Unexpected response.", Detail: "The destination answered in a way Engram does not recognize. Check the endpoint and the region."},
 }
 
+// backupDropboxTestFailures are the Dropbox texts of backupTestFailures.
+var backupDropboxTestFailures = map[string]backupDestinationStatus{
+	"auth_failed":         {Title: "Credentials rejected.", Detail: "Dropbox refused the app key, app secret or refresh token. Save the destination again with a refresh token issued for this app (token_access_type=offline)."},
+	"folder_conflict":     {Title: "Folder path is a file.", Detail: "A file already exists at the folder path in Dropbox. Save the destination with another folder."},
+	"network":             {Title: "Dropbox unreachable.", Detail: "Network error or no answer within 15 s. Check DNS and the firewall from this server, then test again."},
+	"key_mismatch":        {Title: "Saved credentials cannot be opened.", Detail: "ENGRAM_CLOUD_BACKUP_KEY changed since they were saved. Save the destination again with the app secret and refresh token."},
+	"unexpected_response": {Title: "Unexpected response.", Detail: "Dropbox answered in a way Engram does not recognize. Test again later."},
+}
+
 // destinationStatus is Locked without ENGRAM_CLOUD_BACKUP_KEY, Not tested
 // when no test was recorded since the last save, else Connected or Failing
 // from the newest test.
@@ -523,7 +700,11 @@ func (v BackupsPageView) destinationStatus() backupDestinationStatus {
 	case v.DestinationTest.Succeeded:
 		return backupDestinationStatus{Class: "is-connected", Label: "Connected"}
 	}
-	status, ok := backupTestFailures[v.DestinationTest.ReasonCode]
+	failures := backupTestFailures
+	if v.isDropboxDestination() {
+		failures = backupDropboxTestFailures
+	}
+	status, ok := failures[v.DestinationTest.ReasonCode]
 	if !ok {
 		status = backupDestinationStatus{Title: "Connection test failed.", Detail: "Check the destination and test again."}
 	}
@@ -673,9 +854,28 @@ var backupCheckMessages = map[string]backupCheckMessage{
 	"invalid": {Kind: "danger", Title: "Check the destination."},
 }
 
+// backupDropboxCheckMessages are the texts of a Dropbox check; they link to
+// no wizard step.
+var backupDropboxCheckMessages = map[string]backupCheckMessage{
+	"ok":        {Kind: "success", Title: "Connected.", Detail: "Dropbox accepted these credentials and the folder exists."},
+	"ok-folder": {Kind: "success", Title: "Connected — folder will be created on first upload.", Detail: "Dropbox accepted these credentials; the folder does not exist yet."},
+	"auth":      {Kind: "danger", Title: "Credentials rejected.", Detail: "Dropbox refused the app key, app secret or refresh token. The refresh token must come from this app's offline authorization (token_access_type=offline)."},
+	"folder":    {Kind: "danger", Title: "Folder path is a file.", Detail: "A file already exists at this path in Dropbox. Choose another folder."},
+	"network":   {Kind: "danger", Title: "Dropbox unreachable.", Detail: "Network error or no answer within 15 s. Check DNS and the firewall from this server, then test again."},
+	"error":     {Kind: "danger", Title: "Unexpected response.", Detail: "Dropbox answered in a way Engram does not recognize. Test again later."},
+	"invalid":   {Kind: "danger", Title: "Check the destination."},
+}
+
 // message is the fixed text of the check result; an unknown result has no
 // title and renders nothing.
 func (c BackupDestinationCheck) message() backupCheckMessage {
+	if c.Kind == cloudstore.BackupDestinationKindDropbox {
+		m, ok := backupDropboxCheckMessages[c.Result]
+		if ok && c.Result == "invalid" {
+			m.Detail = c.Error + "."
+		}
+		return m
+	}
 	m, ok := backupCheckMessages[c.Result]
 	if !ok {
 		return backupCheckMessage{}

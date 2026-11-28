@@ -118,7 +118,7 @@ templ backupEnvVarList(names []string) {
 // backupScheduledSection renders the destination, schedule, "Back up now"
 // and run history according to the settings state.
 templ backupScheduledSection(v BackupsPageView) {
-	<p class="backup-lead">Engram uploads the same archive to one S3-compatible bucket on the weekdays and time you choose. Engram never deletes uploaded backups: set expiration with the bucket's lifecycle rules.</p>
+	<p class="backup-lead">Engram uploads the same archive to one destination, an S3-compatible bucket or a Dropbox folder, on the weekdays and time you choose. Engram never deletes uploaded backups: set expiration with the bucket's lifecycle rules, or clean up the Dropbox folder yourself.</p>
 	switch v.Settings {
 		case BackupSettingsNotWired:
 			@EmptyState("Not Available", "This server has no backup settings store. Download a backup above or run engram cloud backup export on the server.")
@@ -149,13 +149,15 @@ templ backupScheduledSection(v BackupsPageView) {
 templ backupDestinationBlock(v BackupsPageView) {
 	<section class="data-frame backup-destination" aria-labelledby="backup-destination-title">
 		<p class="section-kicker" id="backup-destination-title">DESTINATION</p>
-		if v.Destination.Configured {
+		if v.isDropboxDestination() {
+			@backupDropboxSummary(v)
+		} else if v.Destination.Configured {
 			@backupDestinationSummary(v)
 		} else if v.wizardVisible() {
 			<div class="backup-dest-head">
 				<div>
 					<h4>Set up an off-site destination</h4>
-					<p class="muted">No destination is configured. Nothing is uploaded off this server yet; <strong>Download backup</strong> above still works. Setup takes about two minutes: have your bucket name and an access key pair ready.</p>
+					<p class="muted">No destination is configured. Nothing is uploaded off this server yet; <strong>Download backup</strong> above still works. Setup takes about two minutes: { v.setupReadyNote() }</p>
 				</div>
 				@StatusBadge("Not configured", "muted")
 			</div>
@@ -178,18 +180,35 @@ templ backupDestinationBlock(v BackupsPageView) {
 				</p>
 			</div>
 		}
-		if v.Destination.Configured && v.DestinationCheck.Result != "" {
+		if v.Destination.Configured && v.DestinationCheck.Result != "" && !v.dropboxCheckVisible() {
 			@BackupDestinationCheckResult(v.DestinationCheck)
 		}
 		if v.settingsFormsVisible() {
 			if v.Destination.Configured {
 				<details class="backup-change" open?={ v.destinationFormOpen() }>
 					<summary>Change destination</summary>
-					<p class="hint">The same grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
-					@backupDestinationForm(v)
+					@backupStoragePicker(v)
+					switch v.storageKind() {
+						case "dropbox":
+							<p class="hint">Saving replaces the current destination. The app secret and refresh token fields start empty; the saved credentials keep working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
+							@backupDropboxForm(v)
+						case "gdrive":
+							@backupGDriveComing()
+						default:
+							<p class="hint">The same grouped form, pre-filled with the endpoint, region, bucket and prefix. Key fields start empty; the saved key <code>{ v.Destination.AccessKeyIDHint }</code> keeps working until you save. Saving resets the status to <strong>Not tested</strong>.</p>
+							@backupDestinationForm(v)
+					}
 				</details>
 			} else {
-				@backupDestinationWizard(v)
+				@backupStoragePicker(v)
+				switch v.storageKind() {
+					case "dropbox":
+						@backupDropboxForm(v)
+					case "gdrive":
+						@backupGDriveComing()
+					default:
+						@backupDestinationWizard(v)
+				}
 			}
 		}
 	</section>
@@ -239,6 +258,21 @@ templ backupDestinationSummary(v BackupsPageView) {
 		<div><dt>Access key id</dt><dd><code>{ v.Destination.AccessKeyIDHint }</code></dd></div>
 		<div><dt>Saved</dt><dd>{ formatTimeValue(v.Destination.UpdatedAt) }</dd></div>
 	</dl>
+	@backupRunFacts(v)
+	if v.settingsFormsVisible() {
+		<details class="backup-remove"><summary class="backup-remove-toggle">Remove destination</summary>
+			<form method="post" action="/dashboard/admin/backups/destination/remove" class="backup-confirm">
+				<p><strong>Remove this destination?</strong> Engram stops uploading to <strong>{ v.Destination.Bucket }</strong> and deletes the saved keys. Backups already uploaded stay in the bucket. While the schedule stays enabled, each scheduled run is recorded as skipped until you save a new destination.</p>
+				<button type="submit" class="backup-danger-fill">Yes, remove destination</button>
+			</form>
+		</details>
+	}
+}
+
+// backupRunFacts is the last upload, with the location the uploader
+// returned (an S3 object key or a Dropbox path), and the last failure when
+// no upload succeeded after it.
+templ backupRunFacts(v BackupsPageView) {
 	<dl class="backup-facts backup-run-facts">
 		<div>
 			<dt>Last upload</dt>
@@ -266,14 +300,197 @@ templ backupDestinationSummary(v BackupsPageView) {
 			</div>
 		}
 	</dl>
+}
+
+// backupDropboxSummary is the status card of a stored Dropbox destination:
+// kind, folder, masked app key, the status pill of the latest test, where
+// the next backup lands and the last upload's Dropbox path. It never holds a
+// secret or the full app key. Test and remove use the same routes as any
+// destination.
+templ backupDropboxSummary(v BackupsPageView) {
+	<div class="backup-summary">
+		<div class="backup-summary-body">
+			<h4 class="backup-summary-title">Dropbox <span class={ "backup-pill " + v.destinationStatus().Class }>{ v.destinationStatus().Label }</span></h4>
+			<p class="backup-summary-path">{ backupDropboxFolderPrefix(v.Destination.Dropbox.FolderPath) }</p>
+			@backupDestinationStatusMeta(v)
+		</div>
+		if v.settingsFormsVisible() {
+			<div class="backup-summary-actions">
+				<form method="post" action="/dashboard/admin/backups/destination/test" class="switch-form">
+					if v.DestinationTest.Tested() {
+						<button type="submit" class="secondary">Test again</button>
+					} else {
+						<button type="submit">Test connection</button>
+					}
+				</form>
+			</div>
+		}
+	</div>
+	if s := v.destinationStatus(); s.Title != "" {
+		<div class="backup-status-line"><p><strong>{ s.Title }</strong> { s.Detail }</p></div>
+	}
+	<div class="backup-path-strip" role="group" aria-label="Where the next backup lands">
+		<p class="backup-path-line">
+			<span class="backup-path-seg is-bucket"><small>Folder</small><span class="backup-path-bucket">{ backupDropboxFolderPrefix(v.Destination.Dropbox.FolderPath) }</span></span>
+			<span class="backup-path-seg"><small>File, one per run</small><span class="backup-path-file">{ backupObjectNamePattern }</span></span>
+		</p>
+	</div>
+	<dl class="backup-facts">
+		<div><dt>Storage</dt><dd>Dropbox</dd></div>
+		<div><dt>App key</dt><dd><code>{ v.Destination.AccessKeyIDHint }</code></dd></div>
+		<div><dt>Saved</dt><dd>{ formatTimeValue(v.Destination.UpdatedAt) }</dd></div>
+	</dl>
+	@backupRunFacts(v)
 	if v.settingsFormsVisible() {
 		<details class="backup-remove"><summary class="backup-remove-toggle">Remove destination</summary>
 			<form method="post" action="/dashboard/admin/backups/destination/remove" class="backup-confirm">
-				<p><strong>Remove this destination?</strong> Engram stops uploading to <strong>{ v.Destination.Bucket }</strong> and deletes the saved keys. Backups already uploaded stay in the bucket. While the schedule stays enabled, each scheduled run is recorded as skipped until you save a new destination.</p>
+				<p><strong>Remove this destination?</strong> Engram stops uploading to <strong>{ v.Destination.Dropbox.FolderPath }</strong> and deletes the saved app secret and refresh token. Backups already uploaded stay in Dropbox. While the schedule stays enabled, each scheduled run is recorded as skipped until you save a new destination.</p>
 				<button type="submit" class="backup-danger-fill">Yes, remove destination</button>
 			</form>
 		</details>
 	}
+}
+
+// backupStoragePicker chooses the kind of destination whose form renders:
+// a segmented row of plain links to ?kind=, so it works without JavaScript
+// and adds no form to the page. The current kind is marked with
+// aria-current. Nothing is stored until a destination form is saved.
+templ backupStoragePicker(v BackupsPageView) {
+	<div class="backup-storage-pick">
+		<p class="backup-storage-label" id="backup-storage-label">Storage</p>
+		<nav class="backup-storage-options" aria-labelledby="backup-storage-label">
+			for _, o := range backupStorageOptions {
+				if v.storageKind() == o.Kind {
+					<a href={ templ.SafeURL(backupStorageURL(o.Kind)) } data-storage-kind={ o.Kind } aria-current="true" class="active">{ o.Name }</a>
+				} else {
+					<a href={ templ.SafeURL(backupStorageURL(o.Kind)) } data-storage-kind={ o.Kind }>{ o.Name }</a>
+				}
+			}
+		</nav>
+		<p class="hint">Where Engram sends the archives. One destination at a time: saving another kind replaces the current one.</p>
+	</div>
+}
+
+// backupGDriveComing is the Google Drive choice until its OAuth flow exists:
+// plain text, no controls.
+templ backupGDriveComing() {
+	<div class="backup-coming" role="note">
+		<p><strong>Google Drive is coming next.</strong> Connecting with your Google account will be added in a later update. Choose S3-compatible or Dropbox storage for now.</p>
+	</div>
+}
+
+// backupDropboxForm is the Dropbox destination form: a plain POST to the
+// save route with kind=dropbox. "Test connection" posts the same fields to
+// the check route through formaction, so checking before saving works
+// without JavaScript; Save is the first submit button, so Enter saves. The
+// app secret and the refresh token are required on every save and always
+// render empty.
+templ backupDropboxForm(v BackupsPageView) {
+	<form method="post" action="/dashboard/admin/backups/destination" class="backup-provider-form backup-dropbox-form" autocomplete="off">
+		<input type="hidden" name="kind" value="dropbox"/>
+		if v.dropboxSaveRefused() {
+			<div class="alert alert-danger" role="alert">
+				<p>
+					<strong>Destination not saved.</strong>
+					if reason := v.dropboxErrorUnplaced(); reason != "" {
+						{ reason + "." }
+					} else {
+						Fix the field marked below.
+					}
+					Your app secret and refresh token were not stored: paste them again.
+				</p>
+			</div>
+		}
+		if v.dropboxCheckVisible() {
+			@BackupDestinationCheckResult(v.DestinationCheck)
+		}
+		<div class="backup-form-body">
+			<div class="backup-groups">
+				<fieldset class="backup-group">
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">1</span>Dropbox app</legend>
+					<p class="hint backup-group-hint">The app Engram uses to reach your Dropbox.</p>
+					<div class="backup-group-fields even">
+						<div class="backup-field">
+							<label for="backup-dropbox-app-key">App key</label>
+							<input type="text" id="backup-dropbox-app-key" name="app_key" value={ v.dropboxFormValue("app_key") } autocomplete="off" spellcheck="false" placeholder="From the app's Settings tab" class="mono-input" required { v.dropboxFieldAttrs("app_key", "backup-dropbox-app-key", false)... }/>
+							@backupFieldError(v.dropboxFieldError("app_key"), "backup-dropbox-app-key")
+						</div>
+						<div class="backup-field">
+							<label for="backup-dropbox-app-secret">App secret</label>
+							<input type="password" id="backup-dropbox-app-secret" name="app_secret" value="" autocomplete="new-password" placeholder="From the app's Settings tab" required { v.dropboxFieldAttrs("app_secret", "backup-dropbox-app-secret", false)... }/>
+							@backupFieldError(v.dropboxFieldError("app_secret"), "backup-dropbox-app-secret")
+						</div>
+					</div>
+				</fieldset>
+				<fieldset class="backup-group">
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">2</span>Authorization</legend>
+					<p class="hint backup-group-hint">A long-lived refresh token; Engram trades it for short-lived access tokens.</p>
+					<div class="backup-group-fields">
+						<div class="backup-field">
+							<label for="backup-dropbox-refresh-token">Refresh token</label>
+							<input type="password" id="backup-dropbox-refresh-token" name="refresh_token" value="" autocomplete="new-password" placeholder="Paste the refresh_token value" required { v.dropboxFieldAttrs("refresh_token", "backup-dropbox-refresh-token", false)... }/>
+							@backupFieldError(v.dropboxFieldError("refresh_token"), "backup-dropbox-refresh-token")
+						</div>
+					</div>
+				</fieldset>
+				<fieldset class="backup-group">
+					<legend class="backup-group-title"><span class="backup-step" aria-hidden="true">3</span>Location</legend>
+					<p class="hint backup-group-hint">Where the archives land.</p>
+					<div class="backup-group-fields">
+						<div class="backup-field">
+							<label for="backup-dropbox-folder">Folder</label>
+							<input type="text" id="backup-dropbox-folder" name="folder_path" value={ v.dropboxFormValue("folder_path") } placeholder="/Engram backups" class="mono-input" spellcheck="false" required { v.dropboxFieldAttrs("folder_path", "backup-dropbox-folder", true)... }/>
+							@backupFieldError(v.dropboxFieldError("folder_path"), "backup-dropbox-folder")
+							<span class="hint" id="backup-dropbox-folder-hint">Starts with <code>/</code>. With an App folder app it lives inside <code>Apps/&lt;app name&gt;</code>. Engram creates it on the first upload.</span>
+						</div>
+					</div>
+				</fieldset>
+			</div>
+			<aside class="backup-aside" aria-label="What you are saving">
+				<div class="backup-path-preview">
+					<p class="section-kicker">Backups will be saved as</p>
+					<p class="backup-path"><span class="backup-path-bucket">{ backupDropboxFolderPrefix(v.dropboxFormValue("folder_path")) }</span><span class="backup-path-file">{ "engram-cloud-backup-<UTC timestamp>-run<id>.tar.gz" }</span></p>
+					<p class="hint">One file per run: UTC time plus run number, so runs never overwrite each other. Engram never deletes them.</p>
+				</div>
+				<div class="backup-why-keys">
+					<h5><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"></rect><path d="M5.5 7V5a2.5 2.5 0 015 0v2" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg>Why paste them again?</h5>
+					<p>Engram encrypts the app secret and the refresh token together with this exact app key and folder, and never shows them again, not even to admins.</p>
+					<p>So every save needs both, even if you only changed the folder. Keep them in your password manager.</p>
+				</div>
+			</aside>
+		</div>
+		@backupDropboxHelp()
+		<div class="backup-submit-row">
+			<p class="muted">Saving stores the destination; it does not upload anything. <strong>Test connection</strong> checks these values with Dropbox and stores nothing.</p>
+			<div class="backup-dropbox-actions">
+				<button type="submit">Save destination</button>
+				<button type="submit" class="secondary" formaction="/dashboard/admin/backups/destination/check">Test connection</button>
+			</div>
+		</div>
+	</form>
+}
+
+// backupDropboxHelp explains, collapsed, how to create the Dropbox app and
+// obtain a refresh token with the offline authorization code flow.
+templ backupDropboxHelp() {
+	<details class="backup-help">
+		<summary>How to get these values</summary>
+		<ol class="backup-help-steps">
+			<li>Open the <a href="https://www.dropbox.com/developers/apps" rel="noopener noreferrer" target="_blank">Dropbox App Console</a> and choose <strong>Create app</strong>.</li>
+			<li>Choose <strong>Scoped access</strong>, then <strong>App folder</strong> (recommended: the app only sees <code>Apps/&lt;app name&gt;</code>) or <strong>Full Dropbox</strong>.</li>
+			<li>On the <strong>Permissions</strong> tab enable <code>files.content.write</code> and <code>files.metadata.read</code>, then press <strong>Submit</strong>. Do this before you authorize: a token keeps the permissions it was issued with.</li>
+			<li>On the <strong>Settings</strong> tab copy the <strong>App key</strong> and the <strong>App secret</strong>.</li>
+			<li>
+				Signed in as the Dropbox account that should hold the backups, open this URL with your app key in place of <code>APP_KEY</code>, press <strong>Allow</strong> and copy the authorization code:
+				<pre class="backup-help-code"><code>{ backupDropboxAuthorizeURL }</code></pre>
+			</li>
+			<li>
+				Within a few minutes, trade the code for a refresh token:
+				<pre class="backup-help-code"><code>{ backupDropboxTokenExchange }</code></pre>
+				Paste the <code>refresh_token</code> value of the answer, not <code>access_token</code>, which expires within hours.
+			</li>
+		</ol>
+	</details>
 }
 
 // backupDestinationStatusMeta is the line under the status pill: when and
@@ -284,7 +501,7 @@ templ backupDestinationStatusMeta(v BackupsPageView) {
 			case v.Settings == BackupSettingsKeyMissing:
 				The saved keys cannot be used or tested until <code>ENGRAM_CLOUD_BACKUP_KEY</code> is set.
 			case !v.DestinationTest.Tested():
-				Not tested since it was saved; the next backup is the first check that the saved keys reach the bucket.
+				{ v.untestedNote() }
 			default:
 				{ "Last tested " }
 				@backupWhen(v.DestinationTest.OccurredAt, v.now())
@@ -292,7 +509,7 @@ templ backupDestinationStatusMeta(v BackupsPageView) {
 					{ " by " + v.DestinationTest.ActorName }
 				}
 				if v.DestinationTest.Succeeded {
-					{ " · the bucket was listed with the saved keys." }
+					{ v.testedNote() }
 				}
 		}
 	</p>

@@ -13,16 +13,19 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/backupcrypto"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/dashboard"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/dropbox"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/s3client"
 )
 
 // This file implements the dashboard Backups page and its settings routes
-// (cloud backups stage 3): the external S3-compatible destination, the
+// (cloud backups stage 3): the external destination (an S3-compatible
+// bucket or a Dropbox folder, chosen by the kind form field), the
 // weekday/time schedule, "Back up now" and the run history. Every mutation
 // route is POST only, requires a managed admin (requireManagedAdmin), passes
 // the same-origin check (dashboard_backup_origin.go) and is audited. Form
 // fields are read one by one from the POST body; a request body is never
-// decoded into cloudstore.PutBackupDestinationParams.
+// decoded into cloudstore.PutBackupDestinationParams or
+// cloudstore.PutDropboxDestinationParams.
 
 // BackupSettingsStore is the storage boundary of the backup settings.
 // *cloudstore.CloudStore satisfies it; the destination and schedule writes
@@ -30,8 +33,11 @@ import (
 type BackupSettingsStore interface {
 	GetBackupDestination(ctx context.Context) (cloudstore.BackupDestination, error)
 	PutBackupDestination(ctx context.Context, params cloudstore.PutBackupDestinationParams, sealer cloudstore.BackupSecretSealer) error
+	PutDropboxDestination(ctx context.Context, params cloudstore.PutDropboxDestinationParams, sealer cloudstore.BackupSecretSealer) error
 	ClearBackupDestination(ctx context.Context, actor cloudstore.BackupDestinationActor) error
-	OpenBackupDestinationCredentials(ctx context.Context, opener cloudstore.BackupSecretOpener) (cloudstore.BackupDestinationCredentials, error)
+	// OpenBackupDestination opens the stored destination of any kind for
+	// "Test connection".
+	OpenBackupDestination(ctx context.Context, opener cloudstore.BackupSecretOpener) (cloudstore.OpenedBackupDestination, error)
 	GetBackupSchedule(ctx context.Context) (cloudstore.BackupSchedule, error)
 	PutBackupSchedule(ctx context.Context, params cloudstore.PutBackupScheduleParams) error
 	ListBackupRuns(ctx context.Context, limit int) ([]cloudstore.BackupRun, error)
@@ -114,7 +120,14 @@ const (
 	// backupReasonInvalidDestination is the reason code of a
 	// backup.destination.check refused by validation.
 	backupReasonInvalidDestination = "invalid_destination"
+	// backupReasonFolderConflict fails a Dropbox check whose folder path is
+	// a file.
+	backupReasonFolderConflict = "folder_conflict"
 )
+
+// backupStorageKindReason refuses a destination save or check of a kind
+// the dashboard has no form for.
+const backupStorageKindReason = "choose S3-compatible or Dropbox storage"
 
 // backupNotices maps the notice query parameter to a fixed message, so a
 // crafted URL can only select one of these.
@@ -130,22 +143,26 @@ var backupNotices = map[string]dashboard.BackupsNotice{
 	"test-key":            {Kind: "danger", Title: "Credentials cannot be opened.", Message: "Connection test failed: the stored credentials cannot be opened with the current ENGRAM_CLOUD_BACKUP_KEY. Save the destination again.", Destination: true},
 	"test-none":           {Kind: "danger", Title: "No destination.", Message: "Connection test failed: no backup destination is configured.", Destination: true},
 	"test-unsupported":    {Kind: "danger", Title: "Not available.", Message: "Connection test is not available for this kind of destination yet.", Destination: true},
-	"run-started":         {Kind: "success", Message: "Backup started. Its result appears in the run history."},
-	"run-busy":            {Kind: "danger", Message: "A backup is already running; wait for it to finish."},
-	"run-failed":          {Kind: "danger", Message: "The backup could not be started. Check the server log."},
-	"run-unsupported":     {Kind: "danger", Message: "This server cannot upload to this kind of destination yet; no backup was started."},
+	// Dropbox connection tests: dropbox-test-<result>.
+	"dropbox-test-ok":        {Kind: "success", Title: "Connected.", Message: "Connection test passed: Dropbox accepted the stored credentials and the folder exists.", Destination: true},
+	"dropbox-test-ok-folder": {Kind: "success", Title: "Connected — folder will be created on first upload.", Message: "Connection test passed: Dropbox accepted the stored credentials; the folder does not exist yet.", Destination: true},
+	"dropbox-test-auth":      {Kind: "danger", Title: "Credentials rejected.", Message: "Connection test failed: Dropbox refused the stored app key, app secret or refresh token.", Destination: true},
+	"dropbox-test-folder":    {Kind: "danger", Title: "Folder path is a file.", Message: "Connection test failed: a file already exists at the folder path in Dropbox.", Destination: true},
+	"dropbox-test-network":   {Kind: "danger", Title: "Dropbox unreachable.", Message: "Connection test failed: Dropbox could not be reached (network error or timeout).", Destination: true},
+	"dropbox-test-error":     {Kind: "danger", Title: "Unexpected response.", Message: "Connection test failed: Dropbox returned an unexpected response.", Destination: true},
+	"run-started":            {Kind: "success", Message: "Backup started. Its result appears in the run history."},
+	"run-busy":               {Kind: "danger", Message: "A backup is already running; wait for it to finish."},
+	"run-failed":             {Kind: "danger", Message: "The backup could not be started. Check the server log."},
+	"run-unsupported":        {Kind: "danger", Message: "This server cannot upload to this kind of destination yet; no backup was started."},
 }
 
 // backupKindNotice describes a stored destination of a kind the dashboard
-// has no form for yet (Dropbox, Google Drive) with its non-secret settings;
-// the OAuth client identifier shows only its last characters. It is empty
-// for an s3 destination.
+// has no form for yet (Google Drive) with its non-secret settings; the OAuth
+// client identifier shows only its last characters. It is empty for an s3
+// or Dropbox destination.
 func backupKindNotice(d cloudstore.BackupDestination) dashboard.BackupsNotice {
 	var title, detail string
 	switch d.Kind {
-	case cloudstore.BackupDestinationKindDropbox:
-		title = "Dropbox destination."
-		detail = "folder " + d.Dropbox.FolderPath + ", app key " + backupClientIDHint(d.Dropbox.AppKey)
 	case cloudstore.BackupDestinationKindGDrive:
 		state := "pending authorization"
 		if d.GDrive.Authorized {
@@ -159,19 +176,20 @@ func backupKindNotice(d cloudstore.BackupDestination) dashboard.BackupsNotice {
 	return dashboard.BackupsNotice{
 		Kind:        "danger",
 		Title:       title,
-		Message:     "Stored destination: " + detail + ". This dashboard cannot edit or test this kind of destination yet; remove it to configure an S3-compatible bucket.",
+		Message:     "Stored destination: " + detail + ". This dashboard cannot edit or test this kind of destination yet; remove it to configure an S3-compatible bucket or a Dropbox folder.",
 		Destination: true,
 	}
 }
 
-// backupKindSummary maps a non-s3 destination onto the fields the status
-// card renders: the folder in place of the bucket and the client
-// identifier hint in place of the access key id hint. The S3 fields stay
-// empty, so the Change destination form is not pre-filled with them.
+// backupKindSummary maps a stored destination onto the fields the status
+// card renders. A Dropbox destination keeps its folder and carries only the
+// app key hint (the full app key is cleared, so the page cannot render it);
+// a Google Drive destination shows its folder in place of the bucket and
+// the client identifier hint in place of the access key id hint.
 func backupKindSummary(d cloudstore.BackupDestination) cloudstore.BackupDestination {
 	switch d.Kind {
 	case cloudstore.BackupDestinationKindDropbox:
-		d.Bucket, d.AccessKeyIDHint = d.Dropbox.FolderPath, backupClientIDHint(d.Dropbox.AppKey)
+		d.AccessKeyIDHint, d.Dropbox.AppKey = backupClientIDHint(d.Dropbox.AppKey), ""
 	case cloudstore.BackupDestinationKindGDrive:
 		d.Bucket, d.AccessKeyIDHint = d.GDrive.FolderName, backupClientIDHint(d.GDrive.ClientID)
 	}
@@ -200,8 +218,56 @@ func checkBackupDestinationAccess(ctx context.Context, creds cloudstore.BackupDe
 	return client.CheckAccess(ctx)
 }
 
+// checkDropboxDestinationAccess is the default Dropbox access check: it
+// refreshes an access token and reads the folder's metadata, writing
+// nothing. httpClient is nil outside tests.
+func checkDropboxDestinationAccess(ctx context.Context, creds cloudstore.DropboxDestinationCredentials, httpClient *http.Client) error {
+	client, err := dropbox.New(dropbox.Config{AppKey: creds.AppKey, AppSecret: creds.AppSecret, RefreshToken: creds.RefreshToken, HTTPClient: httpClient})
+	if err != nil {
+		return err
+	}
+	return client.CheckAccess(ctx, creds.FolderPath)
+}
+
+// runDropboxCheck runs the Dropbox access check bounded like the S3 one.
+func (s *CloudServer) runDropboxCheck(ctx context.Context, creds cloudstore.DropboxDestinationCredentials) error {
+	ctx, cancel := context.WithTimeout(ctx, backupConnectionTestTimeout)
+	defer cancel()
+	if s.backupCheckDropbox != nil {
+		return s.backupCheckDropbox(ctx, creds)
+	}
+	return checkDropboxDestinationAccess(ctx, creds, s.backupDropboxHTTPClient)
+}
+
+// classifyDropboxConnectionTest maps a Dropbox access check to a result and
+// a failure reason code ("" for success). A missing folder is a success:
+// the first upload creates it.
+func classifyDropboxConnectionTest(err error) (string, string) {
+	switch {
+	case err == nil:
+		return "ok", ""
+	case errors.Is(err, dropbox.ErrFolderNotFound):
+		return "ok-folder", ""
+	case errors.Is(err, dropbox.ErrAuth):
+		return "auth", backupReasonAuthFailed
+	case errors.Is(err, dropbox.ErrConflict):
+		return "folder", backupReasonFolderConflict
+	case errors.Is(err, dropbox.ErrNetwork), errors.Is(err, dropbox.ErrUploadStalled), errors.Is(err, context.DeadlineExceeded):
+		return "network", backupReasonNetwork
+	default:
+		return "error", backupReasonUnexpectedResponse
+	}
+}
+
+// dropboxAuditMetadata is the non-secret description of a Dropbox
+// destination in an audit row: kind, folder and app key hint.
+func dropboxAuditMetadata(creds cloudstore.DropboxDestinationCredentials, result string) map[string]any {
+	return map[string]any{"kind": cloudstore.BackupDestinationKindDropbox, "folder_path": creds.FolderPath, "app_key_hint": backupClientIDHint(creds.AppKey), "result": result}
+}
+
 // handleDashboardBackupsPage handles GET /dashboard/admin/backups. Any
 // dashboard admin may view it; forms render only for managed admins.
+// ?kind=s3|dropbox|gdrive selects the destination form.
 func (s *CloudServer) handleDashboardBackupsPage(w http.ResponseWriter, r *http.Request) {
 	if !s.isDashboardAdmin(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -228,6 +294,20 @@ func (s *CloudServer) renderBackupsPageWithForm(w http.ResponseWriter, r *http.R
 func (s *CloudServer) renderBackupsPageWithCheck(w http.ResponseWriter, r *http.Request, status int, notice dashboard.BackupsNotice, form dashboard.BackupDestinationForm, check dashboard.BackupDestinationCheck) {
 	view := s.backupsPageView(r)
 	view.DestinationForm = form
+	view.DestinationCheck = check
+	if form.Submitted {
+		// Re-render the S3 form even when another kind is stored.
+		view.StorageKind = cloudstore.BackupDestinationKindS3
+	}
+	s.renderBackupsPageView(w, r, status, view, notice)
+}
+
+// renderBackupsPageWithDropbox renders the page with the Dropbox form
+// re-rendered from form (never a secret) and the result of a Dropbox check.
+func (s *CloudServer) renderBackupsPageWithDropbox(w http.ResponseWriter, r *http.Request, status int, notice dashboard.BackupsNotice, form dashboard.BackupDropboxForm, check dashboard.BackupDestinationCheck) {
+	view := s.backupsPageView(r)
+	view.StorageKind = cloudstore.BackupDestinationKindDropbox
+	view.DropboxForm = form
 	view.DestinationCheck = check
 	s.renderBackupsPageView(w, r, status, view, notice)
 }
@@ -256,6 +336,9 @@ func (s *CloudServer) backupsPageView(r *http.Request) dashboard.BackupsPageView
 		CanManage:  s.canManageManagedUsers(r),
 		Tables:     cloudstore.BackupTables(),
 		Exclusions: cloudstore.BackupExclusions(),
+	}
+	if kind := r.URL.Query().Get("kind"); dashboard.IsBackupStorageKind(kind) {
+		view.StorageKind, view.StorageKindChosen = kind, true
 	}
 	if s.backupSettings == nil {
 		return view
@@ -336,6 +419,15 @@ func (s *CloudServer) handleDashboardSaveBackupDestination(w http.ResponseWriter
 	if !parseDashboardMutationForm(w, r) {
 		return
 	}
+	switch r.PostForm.Get("kind") {
+	case "", cloudstore.BackupDestinationKindS3:
+	case cloudstore.BackupDestinationKindDropbox:
+		s.saveDropboxDestination(w, r, actor)
+		return
+	default:
+		s.renderBackupsPage(w, r, http.StatusBadRequest, dashboard.BackupsNotice{Kind: "danger", Message: "Destination not saved: " + backupStorageKindReason + ".", Destination: true})
+		return
+	}
 	params := backupDestinationFormParams(r, actor)
 	err := s.backupSettings.PutBackupDestination(r.Context(), params, s.backupKey)
 	switch {
@@ -352,6 +444,62 @@ func (s *CloudServer) handleDashboardSaveBackupDestination(w http.ResponseWriter
 		log.Printf("[engram-cloud] save backup destination failed: actor=%q: %v", actor.ID, err)
 		http.Error(w, "save backup destination failed", http.StatusInternalServerError)
 	}
+}
+
+// saveDropboxDestination saves a kind=dropbox form. The app secret and the
+// refresh token are required on every save; the store seals them bound to
+// the app key and folder and audits backup.destination.update (kind, folder,
+// app key hint) in the same transaction. A refusal re-renders the app key
+// and the folder only.
+func (s *CloudServer) saveDropboxDestination(w http.ResponseWriter, r *http.Request, actor cloudauth.Principal) {
+	params := dropboxDestinationFormParams(r, actor)
+	err := s.backupSettings.PutDropboxDestination(r.Context(), params, s.backupKey)
+	switch {
+	case err == nil:
+		redirectDashboardAdmin(w, r, backupsPageURL+"?notice=destination-saved")
+	case errors.Is(err, cloudstore.ErrInvalidBackupDestination):
+		reason := backupValidationReason(err, cloudstore.ErrInvalidBackupDestination)
+		form := refusedDropboxForm(params, backupDropboxInvalidField(reason), reason)
+		s.renderBackupsPageWithDropbox(w, r, http.StatusBadRequest, dashboard.BackupsNotice{Kind: "danger", Message: "Destination not saved: " + reason + ".", Destination: true}, form, dashboard.BackupDestinationCheck{})
+	default:
+		log.Printf("[engram-cloud] save Dropbox backup destination failed: actor=%q: %v", actor.ID, err)
+		http.Error(w, "save backup destination failed", http.StatusInternalServerError)
+	}
+}
+
+// dropboxDestinationFormParams reads a Dropbox destination from the POST
+// form (url-encoded body fields only, like backupDestinationFormParams).
+func dropboxDestinationFormParams(r *http.Request, actor cloudauth.Principal) cloudstore.PutDropboxDestinationParams {
+	return cloudstore.PutDropboxDestinationParams{
+		AppKey:       r.PostForm.Get("app_key"),
+		FolderPath:   r.PostForm.Get("folder_path"),
+		AppSecret:    r.PostForm.Get("app_secret"),
+		RefreshToken: r.PostForm.Get("refresh_token"),
+		Actor:        backupStoreActor(actor),
+	}
+}
+
+// refusedDropboxForm is the submitted Dropbox form as the page may
+// re-render it: the app key and the folder, the failing field and its
+// fixed reason, never the app secret or the refresh token.
+func refusedDropboxForm(params cloudstore.PutDropboxDestinationParams, field, reason string) dashboard.BackupDropboxForm {
+	return dashboard.BackupDropboxForm{Submitted: true, AppKey: params.AppKey, FolderPath: params.FolderPath, Field: field, Error: reason}
+}
+
+// backupDropboxInvalidField maps a Dropbox validation reason to the form
+// field it is about; "" when it names none.
+func backupDropboxInvalidField(reason string) string {
+	for _, field := range []struct{ prefix, name string }{
+		{"app key ", "app_key"},
+		{"app secret ", "app_secret"},
+		{"refresh token ", "refresh_token"},
+		{"folder path ", "folder_path"},
+	} {
+		if strings.HasPrefix(reason, field.prefix) {
+			return field.name
+		}
+	}
+	return ""
 }
 
 // backupDestinationFormParams reads the destination from the POST form.
@@ -416,8 +564,10 @@ func backupEchoableEndpoint(endpoint string) string {
 
 // handleDashboardTestBackupDestination handles POST
 // /dashboard/admin/backups/destination/test: it opens the stored credentials
-// and runs a bounded, read-only access check. The typed result is audited as
-// backup.destination.test and shown after a redirect.
+// and runs a bounded, read-only access check (S3: list at most one key;
+// Dropbox: refresh a token and read the folder's metadata). The typed result
+// is audited as backup.destination.test and shown after a redirect. A Google
+// Drive destination cannot be tested yet.
 func (s *CloudServer) handleDashboardTestBackupDestination(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.backupSettingsActor(w, r, true)
 	if !ok {
@@ -430,8 +580,10 @@ func (s *CloudServer) handleDashboardTestBackupDestination(w http.ResponseWriter
 	if !ok {
 		return
 	}
-	creds, err := s.backupSettings.OpenBackupDestinationCredentials(r.Context(), s.backupKey)
+	dest, err := s.backupSettings.OpenBackupDestination(r.Context(), s.backupKey)
+	creds := dest.S3
 	var notice, reason string
+	var metadata map[string]any
 	switch {
 	case errors.Is(err, cloudstore.ErrBackupDestinationNotConfigured):
 		notice, reason = "test-none", backupReasonNotConfigured
@@ -443,6 +595,13 @@ func (s *CloudServer) handleDashboardTestBackupDestination(w http.ResponseWriter
 		log.Printf("[engram-cloud] backup destination test failed to read the destination: actor=%q: %v", actor.ID, err)
 		http.Error(w, "test backup destination failed", http.StatusInternalServerError)
 		return
+	case dest.Kind == cloudstore.BackupDestinationKindDropbox:
+		var result string
+		result, reason = classifyDropboxConnectionTest(s.runDropboxCheck(r.Context(), dest.Dropbox))
+		notice = "dropbox-test-" + result
+		metadata = dropboxAuditMetadata(dest.Dropbox, result)
+	case dest.Kind != cloudstore.BackupDestinationKindS3:
+		notice, reason = "test-unsupported", backupReasonUnsupportedKind
 	default:
 		check := s.backupCheckAccess
 		if check == nil {
@@ -452,7 +611,10 @@ func (s *CloudServer) handleDashboardTestBackupDestination(w http.ResponseWriter
 		notice, reason = classifyBackupConnectionTest(check(ctx, creds))
 		cancel()
 	}
-	event := adminAuditEvent(actor, authAuditActionBackupDestinationTest, "", "", map[string]any{"endpoint": creds.Endpoint, "bucket": creds.Bucket, "result": strings.TrimPrefix(notice, "test-")})
+	if metadata == nil {
+		metadata = map[string]any{"endpoint": creds.Endpoint, "bucket": creds.Bucket, "result": strings.TrimPrefix(notice, "test-")}
+	}
+	event := adminAuditEvent(actor, authAuditActionBackupDestinationTest, "", "", metadata)
 	if reason != "" {
 		event.Outcome = authAuditOutcomeFailure
 		event.ReasonCode = reason
@@ -485,6 +647,15 @@ func (s *CloudServer) handleDashboardCheckBackupDestination(w http.ResponseWrite
 	}
 	store, ok := s.adminStore(w)
 	if !ok {
+		return
+	}
+	switch r.PostForm.Get("kind") {
+	case "", cloudstore.BackupDestinationKindS3:
+	case cloudstore.BackupDestinationKindDropbox:
+		s.checkDropboxDestination(w, r, actor, store)
+		return
+	default:
+		s.renderBackupsPage(w, r, http.StatusBadRequest, dashboard.BackupsNotice{Kind: "danger", Message: "Destination not checked: " + backupStorageKindReason + ".", Destination: true})
 		return
 	}
 	params := backupDestinationFormParams(r, actor)
@@ -541,6 +712,59 @@ func (s *CloudServer) handleDashboardCheckBackupDestination(w http.ResponseWrite
 	}
 	form := refusedBackupDestinationForm(r, params, result.Field, result.Error)
 	s.renderBackupsPageWithCheck(w, r, status, dashboard.BackupsNotice{}, form, result)
+}
+
+// checkDropboxDestination is the check route for a kind=dropbox form: the
+// same validation as the save (cloudstore.ValidateDropboxDestination), then
+// the bounded Dropbox access check, storing and opening nothing. The typed
+// result is audited as backup.destination.check with the kind, folder and
+// app key hint, and answered like the S3 check: an HTML fragment for HTMX,
+// else the page with the Dropbox form re-rendered (app key and folder only;
+// 400 for a validation error).
+func (s *CloudServer) checkDropboxDestination(w http.ResponseWriter, r *http.Request, actor cloudauth.Principal, store AdminIdentityStore) {
+	params := dropboxDestinationFormParams(r, actor)
+	result := dashboard.BackupDestinationCheck{Kind: cloudstore.BackupDestinationKindDropbox}
+	var reason string
+	var metadata map[string]any
+	creds, err := cloudstore.ValidateDropboxDestination(params)
+	switch {
+	case errors.Is(err, cloudstore.ErrInvalidBackupDestination):
+		result.Error = backupValidationReason(err, cloudstore.ErrInvalidBackupDestination)
+		result.Result, result.Field = "invalid", backupDropboxInvalidField(result.Error)
+		reason = backupReasonInvalidDestination
+		metadata = map[string]any{"kind": cloudstore.BackupDestinationKindDropbox, "result": result.Result}
+		if result.Field != "" {
+			metadata["field"] = result.Field
+		}
+	case err != nil:
+		log.Printf("[engram-cloud] Dropbox backup destination check failed to validate: actor=%q: %v", actor.ID, err)
+		http.Error(w, "check backup destination failed", http.StatusInternalServerError)
+		return
+	default:
+		result.Result, reason = classifyDropboxConnectionTest(s.runDropboxCheck(r.Context(), creds))
+		metadata = dropboxAuditMetadata(creds, result.Result)
+	}
+	event := adminAuditEvent(actor, authAuditActionBackupDestinationCheck, "", "", metadata)
+	if reason != "" {
+		event.Outcome = authAuditOutcomeFailure
+		event.ReasonCode = reason
+	}
+	if err := store.InsertAuthAuditEvent(r.Context(), event); err != nil {
+		log.Printf("[engram-cloud] backup destination check audit failed: actor=%q: %v", actor.ID, err)
+		http.Error(w, "record audit failed", http.StatusInternalServerError)
+		return
+	}
+	if isDashboardHTMXRequest(r) {
+		w.Header().Set("Cache-Control", "no-store")
+		renderDashboardAdminComponentStatus(w, r, http.StatusOK, dashboard.BackupDestinationCheckResult(result))
+		return
+	}
+	status := http.StatusOK
+	if result.Result == "invalid" {
+		status = http.StatusBadRequest
+	}
+	form := refusedDropboxForm(params, result.Field, result.Error)
+	s.renderBackupsPageWithDropbox(w, r, status, dashboard.BackupsNotice{}, form, result)
 }
 
 // classifyBackupConnectionTest maps a CheckAccess result to a notice and a

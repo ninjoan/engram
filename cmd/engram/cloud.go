@@ -185,10 +185,7 @@ func cloudRuntimeBackupOptions(cfg cloud.Config, cs *cloudstore.CloudStore) (clo
 	if err != nil {
 		return cloudRuntimeBackups{}, cloudServeBackupKeyRefusal(err)
 	}
-	// Only the S3 uploader is wired so far: a Dropbox or Google Drive
-	// destination is recorded as skipped and its manual runs are refused
-	// until NewDropboxUploader and NewGDriveUploader are set here.
-	runner, err := backuprunner.New(backuprunner.Config{Store: cs, Key: sealer, EngramVersion: version, NewS3Client: backuprunner.NewS3Client})
+	runner, err := backuprunner.New(cloudBackupRunnerConfig(cs, sealer))
 	if err != nil {
 		return cloudRuntimeBackups{}, fmt.Errorf("cloud serve: refusing to start: backup runner: %w", err)
 	}
@@ -197,6 +194,18 @@ func cloudRuntimeBackupOptions(cfg cloud.Config, cs *cloudstore.CloudStore) (clo
 		sealer:  sealer,
 		runner:  runner,
 	}, nil
+}
+
+// cloudBackupRunnerConfig is the backup runner of cloud serve: S3 and
+// Dropbox uploaders. Google Drive is not wired yet, so such a destination is
+// recorded as skipped and its manual runs are refused until
+// NewGDriveUploader is set here.
+func cloudBackupRunnerConfig(cs *cloudstore.CloudStore, sealer *backupcrypto.Sealer) backuprunner.Config {
+	return backuprunner.Config{
+		Store: cs, Key: sealer, EngramVersion: version,
+		NewS3Client:        backuprunner.NewS3Client,
+		NewDropboxUploader: backuprunner.NewDropboxUploader,
+	}
 }
 
 // cloudServeBackupKeyError reports a set but invalid ENGRAM_CLOUD_BACKUP_KEY.
