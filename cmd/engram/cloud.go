@@ -178,6 +178,9 @@ func cloudRuntimeBackupOptions(cfg cloud.Config, cs *cloudstore.CloudStore) (clo
 	if err := cloudServeBackupKeyError(cfg); err != nil {
 		return cloudRuntimeBackups{}, err
 	}
+	if err := cloudServePublicURLError(cfg); err != nil {
+		return cloudRuntimeBackups{}, err
+	}
 	if cfg.BackupKey == nil {
 		return cloudRuntimeBackups{options: []cloudserver.Option{cloudserver.WithBackupSettings(cs, nil)}}, nil
 	}
@@ -196,16 +199,26 @@ func cloudRuntimeBackupOptions(cfg cloud.Config, cs *cloudstore.CloudStore) (clo
 	}, nil
 }
 
-// cloudBackupRunnerConfig is the backup runner of cloud serve: S3 and
-// Dropbox uploaders. Google Drive is not wired yet, so such a destination is
-// recorded as skipped and its manual runs are refused until
-// NewGDriveUploader is set here.
+// cloudBackupRunnerConfig is the backup runner of cloud serve: S3, Dropbox
+// and Google Drive uploaders. A Google Drive destination whose "Connect with
+// Google" authorization is pending is recorded as skipped by the runner.
 func cloudBackupRunnerConfig(cs *cloudstore.CloudStore, sealer *backupcrypto.Sealer) backuprunner.Config {
 	return backuprunner.Config{
 		Store: cs, Key: sealer, EngramVersion: version,
 		NewS3Client:        backuprunner.NewS3Client,
 		NewDropboxUploader: backuprunner.NewDropboxUploader,
+		NewGDriveUploader:  backuprunner.NewGDriveUploader,
 	}
+}
+
+// cloudServePublicURLError reports a set but invalid ENGRAM_CLOUD_PUBLIC_URL
+// as a startup refusal: the Google Drive OAuth redirect URI is built from
+// it, so a bad value is never dropped silently.
+func cloudServePublicURLError(cfg cloud.Config) error {
+	if cfg.PublicURLError == nil {
+		return nil
+	}
+	return fmt.Errorf("cloud serve: refusing to start: %w; unset it to disable Connect with Google", cfg.PublicURLError)
 }
 
 // cloudServeBackupKeyError reports a set but invalid ENGRAM_CLOUD_BACKUP_KEY.
@@ -234,6 +247,9 @@ func cloudRuntimeServerOptions(cfg cloud.Config, cs *cloudstore.CloudStore, allo
 		cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 		cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
 		cloudserver.WithVersion(version),
+		// ENGRAM_CLOUD_PUBLIC_URL (validated at startup) is the only base of
+		// the Google Drive OAuth redirect URI.
+		cloudserver.WithPublicURL(cfg.PublicURL),
 	}
 	if authenticator != nil {
 		options = append(options, cloudserver.WithPrincipalProjectAuthorizer(cloudPrincipalProjectAuthorizer{store: grantStore}))
@@ -1187,9 +1203,13 @@ var listenCloudDuringStartup = net.Listen
 // runtime or its initialization failed for a reason other than the
 // shutdown. A second signal during that shutdown stops the process at once.
 func runCloudServe(cfg cloud.Config) error {
-	// Refuse before binding the port: an invalid backup key must not leave a
-	// server running with scheduled backups silently disabled.
+	// Refuse before binding the port: an invalid backup key or public URL
+	// must not leave a server running with scheduled backups or Connect with
+	// Google silently disabled.
 	if err := cloudServeBackupKeyError(cfg); err != nil {
+		return err
+	}
+	if err := cloudServePublicURLError(cfg); err != nil {
 		return err
 	}
 	signaled, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
