@@ -319,3 +319,48 @@ func TestTokenFormEchoIsRedactedInEveryEncoding(t *testing.T) {
 		}
 	}
 }
+
+// A refresh is bounded by every round trip its 429 retries may make plus
+// their Retry-After waits, not by one RPC timeout: a slow 429 answer
+// followed by a slow success still yields a token.
+func TestTokenRefreshSurvivesARateLimitedSlowAttempt(t *testing.T) {
+	f := newFakeDropbox(t)
+	f.on("/oauth2/token", func(w http.ResponseWriter, _ *recorded, n int) bool {
+		time.Sleep(200 * time.Millisecond)
+		if n == 1 {
+			w.Header().Set("Retry-After", "0")
+			writeJSON(w, http.StatusTooManyRequests, `{"error_summary": "too_many_requests/..", "error": {"reason": {".tag": "too_many_requests"}}}`)
+			return true
+		}
+		return false
+	})
+	c, sleeps := newTestClient(t, f, testConfig())
+	c.rpcTimeout = 300 * time.Millisecond
+	var tok string
+	err := waitErr(t, "accessToken", func() error {
+		var err error
+		tok, err = c.accessToken(context.Background())
+		return err
+	})
+	if err != nil || tok == "" {
+		t.Fatalf("refresh = %q, %v; want a token after the 429 retry", tok, err)
+	}
+	if n := f.count("/oauth2/token"); n != 2 {
+		t.Fatalf("token requests = %d, want 2", n)
+	}
+	if got := sleeps.all(); len(got) != 1 || got[0] != 0 {
+		t.Fatalf("sleeps = %v, want one Retry-After wait of 0s", got)
+	}
+}
+
+func TestTokenRefreshBudgetCoversEveryRateLimitRetry(t *testing.T) {
+	c, err := newClient(testConfig(), productionEndpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.rpcTimeout = time.Second
+	want := time.Duration(maxRateLimitRetries+1)*time.Second + time.Duration(maxRateLimitRetries)*maxRetryWait
+	if got := c.refreshBudget(); got != want {
+		t.Fatalf("refreshBudget = %s, want %s", got, want)
+	}
+}
