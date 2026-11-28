@@ -1640,3 +1640,1495 @@ td:not(:first-child) p,
 .type-pill {
 	font-size: 0.74rem;
 }
+
+/* ─── Admin backups ───────────────────────────────────────────────────────── */
+
+.success-note {
+	border-left: 2px solid var(--engram-success);
+}
+
+.backup-settings-form {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+	gap: 0.65rem 1rem;
+	align-items: end;
+	margin-top: 1rem;
+}
+
+.backup-settings-form label input {
+	margin: 0.25rem 0 0;
+}
+
+.backup-settings-form > p,
+.backup-settings-form > button,
+.backup-settings-form .weekday-picker {
+	grid-column: 1 / -1;
+	margin: 0;
+}
+
+.backup-settings-form > button {
+	width: auto;
+	justify-self: start;
+}
+
+.weekday-picker {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.4rem 1rem;
+	border: 0;
+	padding: 0;
+}
+
+.weekday-picker legend {
+	font-size: 0.82rem;
+	color: var(--engram-text);
+}
+
+.weekday-picker label {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35rem;
+}
+
+.backup-actions {
+	margin-top: 0.85rem;
+}
+
+/* Schedule: the time zone is a native <select> (optgroups per region, the
+   browser's typeahead to jump); "Save schedule" is the form's primary
+   submit in its actions row, and "Back up now" is a separate secondary
+   action with its own helper text. */
+
+.backup-schedule-form {
+	align-items: start;
+}
+
+.backup-schedule-form select {
+	margin: 0;
+}
+
+.backup-schedule-form .hint {
+	margin: 0;
+	color: var(--engram-muted);
+	font-size: 0.84rem;
+	line-height: 1.5;
+}
+
+.backup-schedule-form .field-error {
+	display: block;
+	color: var(--engram-danger);
+	font-size: 0.84rem;
+	line-height: 1.5;
+}
+
+.backup-schedule-form > .backup-schedule-enabled {
+	grid-column: 1 / -1;
+	justify-self: start;
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin: 0;
+}
+
+.backup-schedule-form > .backup-submit-row {
+	grid-column: 1 / -1;
+	margin-top: 0.5rem;
+}
+
+.backup-run-now {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.65rem 1rem;
+	margin-top: 1.25rem;
+	padding-top: 1.1rem;
+	border-top: 1px solid var(--tm-border-soft);
+}
+
+.backup-run-now form {
+	margin: 0;
+}
+
+.backup-run-now button {
+	width: auto;
+	margin: 0;
+}
+
+.backup-run-now .muted {
+	flex: 1 1 18rem;
+	max-width: 60ch;
+	margin: 0;
+}
+
+@media (max-width: 560px) {
+	.backup-run-now {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.backup-run-now .muted {
+		flex-basis: auto;
+	}
+
+	.backup-run-now button {
+		width: 100%;
+	}
+}
+
+/* ─── Backup destination: provider tiles + grouped form ───────────────────── */
+/* The provider tiles are radios inside the destination POST form. The guide
+   for the checked tile is shown with :has(), so no JavaScript is involved;
+   browsers without :has() show every guide and the plain radios. */
+
+.backup-lead {
+	max-width: 72ch;
+	color: var(--engram-text-soft);
+}
+
+.backup-destination h4 {
+	margin: 0;
+	font-size: 1.15rem;
+	letter-spacing: -0.015em;
+}
+
+.backup-dest-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: flex-start;
+	gap: 1rem;
+	margin-bottom: 1.1rem;
+}
+
+.backup-dest-head p {
+	margin: 0.2rem 0 0;
+}
+
+.backup-destination .alert p,
+.backup-provider-form .alert p {
+	margin: 0;
+}
+
+.backup-destination .alert strong {
+	margin-right: 0.25rem;
+}
+
+.backup-destination .alert,
+.backup-destination .alert .muted {
+	color: var(--engram-text);
+}
+
+.backup-destination .alert-danger strong {
+	color: var(--engram-danger);
+}
+
+.backup-destination .alert-success strong {
+	color: var(--engram-success);
+}
+
+.backup-destination .alert {
+	margin: 1rem 0 0;
+}
+
+.backup-provider-form > .alert {
+	margin: 0 0 1rem;
+}
+
+.backup-provider-form fieldset {
+	border: 0;
+	padding: 0;
+	margin: 0;
+	min-width: 0;
+}
+
+.backup-provider-form legend {
+	padding: 0;
+	margin-bottom: 0.6rem;
+	font-weight: 600;
+	font-size: 0.95rem;
+	color: var(--engram-text);
+}
+
+.backup-provider-form legend .muted {
+	font-weight: 400;
+}
+
+.backup-step {
+	display: inline-grid;
+	place-items: center;
+	width: 1.5rem;
+	height: 1.5rem;
+	margin-right: 0.5rem;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-full);
+	background: var(--engram-surface-raised);
+	color: var(--st-pink);
+	font-family: var(--font-mono);
+	font-size: 0.74rem;
+}
+
+/* Provider: a native <select> like the schedule's time zone, with one hint
+   line for the selected provider below it. The server renders the other
+   hints hidden; where :has() is supported the hint follows the option picked
+   since, without JavaScript. */
+
+.backup-provider-form .backup-provider-pick {
+	grid-column: 1 / -1;
+}
+
+.backup-provider-pick select {
+	max-width: 24rem;
+	margin: 0;
+}
+
+.backup-wizard .backup-provider-pick select {
+	background-color: var(--engram-base);
+}
+
+.backup-provider-hint {
+	display: grid;
+	gap: 0.2rem;
+	margin: 0;
+	color: var(--engram-muted);
+	font-size: 0.84rem;
+	line-height: 1.5;
+}
+
+.backup-provider-hint p {
+	margin: 0;
+}
+
+.backup-provider-line {
+	color: var(--engram-text-soft);
+	overflow-wrap: anywhere;
+}
+
+@supports selector(:has(*)) {
+	.backup-provider-pick:has(option:checked) .backup-provider-hint {
+		display: none !important;
+	}
+
+	.backup-provider-pick:has(option[value="r2"]:checked) [data-provider-hint="r2"],
+	.backup-provider-pick:has(option[value="aws"]:checked) [data-provider-hint="aws"],
+	.backup-provider-pick:has(option[value="b2"]:checked) [data-provider-hint="b2"],
+	.backup-provider-pick:has(option[value="wasabi"]:checked) [data-provider-hint="wasabi"],
+	.backup-provider-pick:has(option[value="do"]:checked) [data-provider-hint="do"],
+	.backup-provider-pick:has(option[value="minio"]:checked) [data-provider-hint="minio"],
+	.backup-provider-pick:has(option[value="other"]:checked) [data-provider-hint="other"] {
+		display: grid !important;
+	}
+}
+
+.backup-form-body {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 21rem;
+	gap: 1.5rem;
+	align-items: start;
+	margin-top: 1.5rem;
+}
+
+.backup-groups {
+	display: grid;
+	gap: 1.4rem;
+}
+
+/* The legend is floated so it lays out as a grid item of its fieldset. */
+.backup-provider-form .backup-group {
+	display: grid;
+	grid-template-columns: 9.5rem minmax(0, 1fr);
+	grid-template-rows: auto 1fr;
+	gap: 0.2rem 1rem;
+	padding-top: 1.1rem;
+	border-top: 1px solid var(--tm-border-soft);
+}
+
+.backup-provider-form .backup-group:first-child {
+	padding-top: 0;
+	border-top: 0;
+}
+
+.backup-provider-form .backup-group-title {
+	float: left;
+	grid-column: 1;
+	grid-row: 1;
+	margin: 0;
+}
+
+.backup-group-hint {
+	grid-column: 1;
+	grid-row: 2;
+	margin: 0;
+}
+
+.backup-group-fields {
+	grid-column: 2;
+	grid-row: 1 / span 2;
+	display: grid;
+	grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+	gap: 0.85rem 1rem;
+}
+
+.backup-group-fields.even {
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.backup-field {
+	display: grid;
+	gap: 0.3rem;
+	align-content: start;
+	min-width: 0;
+}
+
+.backup-field label {
+	margin: 0;
+	font-weight: 600;
+	font-size: 0.95rem;
+}
+
+.backup-field label .muted {
+	font-weight: 400;
+}
+
+.backup-field input {
+	margin: 0;
+}
+
+.backup-provider-form .mono-input {
+	font-family: var(--font-mono);
+	font-size: 0.88rem;
+}
+
+.backup-destination .hint {
+	margin: 0;
+	color: var(--engram-muted);
+	font-size: 0.84rem;
+	line-height: 1.5;
+}
+
+.backup-provider-form .field-error {
+	display: block;
+	color: var(--engram-danger);
+	font-size: 0.84rem;
+	line-height: 1.5;
+}
+
+.backup-aside {
+	position: sticky;
+	top: 1rem;
+	display: grid;
+	gap: 1rem;
+}
+
+.backup-path-preview {
+	padding: 1rem;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-medium);
+	background: var(--engram-surface);
+}
+
+.backup-path-preview .section-kicker {
+	margin-bottom: 0.45rem;
+}
+
+.backup-path {
+	margin: 0 0 0.5rem;
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	line-height: 1.7;
+	color: var(--engram-text-soft);
+	overflow-wrap: anywhere;
+}
+
+.backup-path-bucket { color: var(--engram-text); }
+.backup-path-prefix { color: var(--st-pink); }
+.backup-path-file { color: var(--engram-muted); }
+
+.backup-why-keys {
+	padding: 1rem;
+	border: 1px solid var(--tm-border);
+	border-left: 2px solid var(--engram-info);
+	border-radius: var(--shape-medium);
+	background: var(--tm-surface);
+	font-size: 0.88rem;
+}
+
+.backup-why-keys h5 {
+	display: flex;
+	gap: 0.5rem;
+	align-items: center;
+	margin: 0 0 0.4rem;
+	font-size: 0.92rem;
+	color: var(--engram-text);
+}
+
+.backup-why-keys h5 svg {
+	color: var(--engram-info);
+}
+
+.backup-why-keys p {
+	margin: 0 0 0.5rem;
+	color: var(--engram-text-soft);
+}
+
+.backup-why-keys p:last-child {
+	margin-bottom: 0;
+}
+
+.backup-submit-row {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-between;
+	align-items: center;
+	gap: 1rem;
+	margin-top: 1.5rem;
+	padding-top: 1.1rem;
+	border-top: 1px solid var(--tm-border-soft);
+}
+
+.backup-submit-row .muted {
+	margin: 0;
+	max-width: 52ch;
+}
+
+.backup-submit-row button {
+	width: auto;
+	margin: 0;
+}
+
+/* Configured summary */
+
+.backup-summary {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 1rem;
+	align-items: start;
+}
+
+.backup-summary-title {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.4rem;
+}
+
+.backup-summary-path {
+	margin: 0.15rem 0 0.6rem;
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+	color: var(--engram-text-soft);
+	overflow-wrap: anywhere;
+}
+
+.backup-facts {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 0.5rem 1rem;
+	margin: 0;
+}
+
+.backup-facts div {
+	min-width: 0;
+}
+
+.backup-facts dt {
+	font-size: 0.72rem;
+	font-weight: 500;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--engram-muted);
+}
+
+.backup-facts dd {
+	margin: 0;
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+	color: var(--engram-text);
+	overflow-wrap: anywhere;
+}
+
+.backup-facts dd code {
+	padding: 0;
+	background: transparent;
+	color: inherit;
+}
+
+.backup-summary-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.65rem;
+	align-items: center;
+}
+
+.backup-summary-actions button {
+	margin: 0;
+}
+
+/* Status card: the pill pairs a word with a shape, never color alone:
+   ● Connected, ○ Not tested, ◆ Failing, ■ Locked. */
+
+.backup-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.45rem;
+	padding: 0.2rem 0.75rem;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-full);
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	line-height: 1.5;
+	white-space: nowrap;
+}
+
+.backup-pill::before {
+	content: "";
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: currentColor;
+}
+
+.backup-pill.is-connected {
+	color: var(--engram-success);
+	border-color: rgba(180, 231, 199, 0.4);
+	background: rgba(180, 231, 199, 0.08);
+}
+
+.backup-pill.is-untested {
+	color: var(--engram-warning);
+	border-color: rgba(224, 194, 122, 0.4);
+	background: rgba(224, 194, 122, 0.08);
+}
+
+.backup-pill.is-untested::before {
+	width: 6px;
+	height: 6px;
+	border: 2px solid currentColor;
+	background: transparent;
+}
+
+.backup-pill.is-failing {
+	color: var(--engram-danger);
+	border-color: rgba(255, 113, 143, 0.4);
+	background: rgba(255, 113, 143, 0.08);
+}
+
+.backup-pill.is-failing::before {
+	width: 7px;
+	height: 7px;
+	border-radius: 2px;
+	transform: rotate(45deg);
+}
+
+.backup-pill.is-locked {
+	color: var(--engram-warning);
+	border-color: rgba(224, 194, 122, 0.4);
+	background: rgba(224, 194, 122, 0.08);
+}
+
+.backup-pill.is-locked::before {
+	border-radius: 1px;
+}
+
+.backup-status-meta {
+	margin: 0;
+	color: var(--engram-muted);
+	font-size: 0.86rem;
+}
+
+.backup-status-meta time,
+.backup-when-utc {
+	font-family: var(--font-mono);
+	font-variant-numeric: tabular-nums;
+	color: var(--engram-text-soft);
+}
+
+.backup-when-utc {
+	font-size: 0.8rem;
+}
+
+.backup-status-line {
+	margin: 1rem 0 0;
+	padding: 0.75rem 1rem;
+	border: 1px solid rgba(255, 113, 143, 0.4);
+	border-left: 2px solid var(--engram-danger);
+	border-radius: var(--shape-medium);
+	background: rgba(255, 113, 143, 0.05);
+}
+
+.backup-status-line p {
+	margin: 0;
+	font-size: 0.9rem;
+	color: var(--engram-text-soft);
+}
+
+.backup-status-line strong {
+	color: var(--engram-text);
+}
+
+.backup-path-strip {
+	margin: 1.1rem 0 0;
+	padding: 0.9rem 1.1rem;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-medium);
+	background: var(--engram-surface);
+}
+
+.backup-path-line {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	gap: 0.35rem 0.6rem;
+	margin: 0;
+	font-family: var(--font-mono);
+	font-size: 0.92rem;
+	overflow-wrap: anywhere;
+}
+
+.backup-path-seg {
+	display: inline-grid;
+	gap: 0.2rem;
+	padding-top: 0.35rem;
+	border-top: 2px solid var(--engram-border);
+}
+
+.backup-path-seg.is-bucket {
+	border-top-color: var(--engram-text-soft);
+}
+
+.backup-path-seg.is-prefix {
+	border-top-color: var(--st-pink);
+}
+
+.backup-path-seg small {
+	font-family: var(--font-sans);
+	font-size: 0.68rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--engram-muted);
+}
+
+.backup-destination > .backup-facts {
+	margin-top: 1.1rem;
+}
+
+.backup-run-facts {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.backup-run-facts dd {
+	font-family: var(--font-sans);
+	font-size: 0.86rem;
+	color: var(--engram-text-soft);
+}
+
+.backup-run-key,
+.backup-run-error {
+	display: block;
+	margin-top: 0.2rem;
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	color: var(--engram-text);
+}
+
+.backup-run-error {
+	color: var(--engram-text-soft);
+}
+
+/* Remove destination: a danger outline toggle on the status card that opens
+   an in-place confirm step (native <details>, no JavaScript). */
+
+details.backup-remove {
+	margin: 1rem 0 0;
+	padding-top: 1rem;
+	border-top: 1px solid var(--tm-border-soft);
+	border-bottom: 0;
+}
+
+details.backup-remove > summary.backup-remove-toggle {
+	display: inline-flex;
+	align-items: center;
+	min-height: 2.75rem;
+	padding: 0.55rem 1.1rem;
+	border: 1px solid rgba(255, 113, 143, 0.4);
+	border-radius: var(--shape-small);
+	background: transparent;
+	color: var(--engram-danger);
+	font-size: 0.88rem;
+	font-weight: 600;
+	line-height: 1.2;
+	cursor: pointer;
+	transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+details.backup-remove > summary.backup-remove-toggle::after {
+	display: none;
+}
+
+details.backup-remove > summary.backup-remove-toggle:hover,
+details.backup-remove[open] > summary.backup-remove-toggle {
+	border-color: var(--engram-danger);
+	background: rgba(255, 113, 143, 0.08);
+	color: var(--engram-danger);
+}
+
+details.backup-remove > summary.backup-remove-toggle:focus-visible {
+	outline: 2px solid var(--engram-primary);
+	outline-offset: 2px;
+}
+
+details.backup-remove[open] > summary.backup-remove-toggle {
+	margin-bottom: 0.75rem;
+}
+
+.backup-confirm {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 1rem;
+	align-items: center;
+	padding: 0.9rem 1rem;
+	border: 1px solid rgba(255, 113, 143, 0.4);
+	border-left: 2px solid var(--engram-danger);
+	border-radius: var(--shape-medium);
+	background: rgba(255, 113, 143, 0.05);
+}
+
+.backup-confirm p {
+	margin: 0;
+	font-size: 0.88rem;
+	color: var(--engram-text-soft);
+}
+
+.backup-confirm strong {
+	color: var(--engram-text);
+}
+
+.backup-confirm button.backup-danger-fill {
+	width: auto;
+	margin: 0;
+	border-color: var(--engram-danger);
+	background: var(--engram-danger);
+	color: var(--st-base);
+	box-shadow: none;
+}
+
+.backup-confirm button.backup-danger-fill:hover {
+	transform: none;
+}
+
+details.backup-change {
+	margin: 1rem 0 0;
+	padding-top: 0.85rem;
+	border-top: 1px solid var(--tm-border-soft);
+	border-bottom: 0;
+}
+
+details.backup-change > summary {
+	display: flex;
+	align-items: center;
+	min-height: 2.75rem;
+	color: var(--engram-primary);
+	font-weight: 600;
+	font-size: 0.9rem;
+	cursor: pointer;
+}
+
+details.backup-change > summary:hover {
+	color: var(--engram-primary-hover);
+}
+
+details.backup-change[open] > .hint {
+	margin-bottom: 1rem;
+}
+
+/* What a backup contains: plain-language groups, exact lists collapsed. */
+
+.backup-contents {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 1rem;
+}
+
+.backup-contents-group {
+	padding: 1.1rem 1.25rem;
+	border: 1px solid var(--tm-border);
+	border-radius: var(--shape-large);
+	background: var(--tm-surface);
+}
+
+.backup-contents-group h4 {
+	margin: 0 0 0.75rem;
+	font-size: 1rem;
+	color: var(--engram-text);
+}
+
+.backup-contents-list {
+	display: grid;
+	gap: 0.6rem;
+	margin: 0;
+	padding: 0;
+}
+
+.backup-contents-list li {
+	display: grid;
+	grid-template-columns: 1.25rem minmax(0, 1fr);
+	gap: 0.4rem;
+	margin: 0;
+	list-style: none;
+	font-size: 0.92rem;
+	line-height: 1.5;
+	color: var(--engram-text-soft);
+}
+
+.backup-contents-list strong {
+	color: var(--engram-text);
+	font-weight: 600;
+}
+
+.backup-contents-mark {
+	font-weight: 700;
+}
+
+.is-included .backup-contents-mark {
+	color: var(--engram-success);
+}
+
+.is-excluded .backup-contents-mark {
+	color: var(--engram-danger);
+}
+
+details.tech-details {
+	margin: 1rem 0 0;
+	padding-top: 0.5rem;
+	border-top: 1px solid var(--tm-border-soft);
+	border-bottom: 0;
+}
+
+details.tech-details > summary {
+	display: flex;
+	align-items: center;
+	min-height: 2.75rem;
+	color: var(--engram-muted);
+	font-size: 0.9rem;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+details.tech-details > summary:hover {
+	color: var(--engram-text);
+}
+
+.tech-details-title {
+	margin: 1rem 0 0.5rem;
+	font-size: 0.72rem;
+	font-weight: 400;
+	letter-spacing: 0.18em;
+	text-transform: uppercase;
+	color: var(--st-pink);
+}
+
+@media (max-width: 900px) {
+	.backup-form-body,
+	.backup-group-fields,
+	.backup-group-fields.even,
+	.backup-facts {
+		grid-template-columns: 1fr;
+	}
+
+	.backup-provider-form .backup-group {
+		grid-template-columns: 1fr;
+		grid-template-rows: none;
+	}
+
+	.backup-provider-form .backup-group-title,
+	.backup-group-hint,
+	.backup-group-fields {
+		grid-column: 1;
+		grid-row: auto;
+	}
+
+	.backup-aside {
+		position: static;
+	}
+
+	.backup-summary {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.backup-summary-actions {
+		grid-column: 1 / -1;
+	}
+
+	.backup-run-facts,
+	.backup-confirm,
+	.backup-contents {
+		grid-template-columns: 1fr;
+	}
+}
+
+@media (max-width: 560px) {
+	.backup-dest-head {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.backup-dest-head > .badge {
+		align-self: flex-start;
+	}
+
+	.backup-submit-row {
+		flex-direction: column-reverse;
+		align-items: stretch;
+	}
+}
+
+/* Guided setup (first-time destination). Without JavaScript the four steps
+   are four stacked sections; backups-wizard.js adds .is-stepped and shows one
+   step at a time with the stepper marking the active step (aria-current). */
+
+.backup-wizard > .alert {
+	margin: 0 0 1rem;
+}
+
+.backup-wizard fieldset {
+	border: 0;
+	margin: 0;
+	min-width: 0;
+}
+
+.backup-wizard legend {
+	padding: 0;
+}
+
+.backup-stepper {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	margin: 0 0 1rem;
+	padding: 0;
+	list-style: none;
+}
+
+.backup-stepper li {
+	position: relative;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.backup-stepper li::after {
+	content: "";
+	position: absolute;
+	left: 2.6rem;
+	right: 0.6rem;
+	top: 1.85rem;
+	height: 1px;
+	background: var(--engram-border);
+}
+
+.backup-stepper li:last-child::after {
+	display: none;
+}
+
+.backup-stepper li.is-done::after {
+	background: rgba(240, 149, 200, 0.5);
+}
+
+.backup-stepper a {
+	display: grid;
+	grid-template-columns: 2rem minmax(0, 1fr);
+	gap: 0.1rem 0.7rem;
+	align-items: center;
+	padding: 0.85rem 1rem 0.85rem 0;
+	color: inherit;
+	text-decoration: none;
+}
+
+.backup-stepper-dot {
+	position: relative;
+	z-index: 1;
+	display: grid;
+	place-items: center;
+	width: 2rem;
+	height: 2rem;
+	grid-row: span 2;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-full);
+	background: var(--engram-surface);
+	color: var(--engram-muted);
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	font-weight: 700;
+}
+
+.backup-stepper-name {
+	position: relative;
+	z-index: 1;
+	width: fit-content;
+	padding-right: 0.5rem;
+	background: rgba(26, 18, 24, 0.95);
+	color: var(--engram-text-soft);
+	font-weight: 600;
+	font-size: 0.9rem;
+	line-height: 1.25;
+}
+
+.backup-stepper-sub {
+	font-family: var(--font-mono);
+	font-size: 0.74rem;
+	line-height: 1.3;
+	color: var(--engram-muted);
+	overflow-wrap: anywhere;
+}
+
+.backup-stepper li.is-done .backup-stepper-dot {
+	border-color: var(--engram-primary);
+	color: var(--engram-primary);
+}
+
+.backup-stepper li[aria-current="step"] .backup-stepper-dot {
+	border-color: var(--engram-primary);
+	background: var(--engram-primary);
+	color: var(--st-base);
+}
+
+.backup-stepper li[aria-current="step"] .backup-stepper-name {
+	color: var(--st-pink);
+}
+
+.backup-stepper a:hover .backup-stepper-name {
+	color: var(--engram-text);
+}
+
+.backup-wizard-body {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 20rem;
+	gap: 1.5rem;
+	align-items: start;
+}
+
+.backup-wizard-steps {
+	display: grid;
+	gap: 1rem;
+}
+
+.backup-wizard .backup-step-panel {
+	padding: 1.4rem;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-medium);
+	background: var(--engram-surface);
+}
+
+.backup-wizard .backup-step-panel > legend {
+	float: left;
+	width: 100%;
+}
+
+.backup-wizard .backup-step-panel > legend + * {
+	clear: both;
+}
+
+.backup-step-title {
+	margin: 0 0 0.2rem;
+	font-size: 1.05rem;
+	letter-spacing: -0.01em;
+}
+
+.backup-step-title:focus {
+	outline: none;
+}
+
+.backup-step-title:focus-visible {
+	outline: 2px solid var(--engram-primary);
+	outline-offset: 2px;
+}
+
+.backup-step-panel > p.hint {
+	margin: 0 0 1.1rem;
+}
+
+.backup-wizard .backup-field input {
+	background: var(--engram-base);
+}
+
+.backup-wizard .mono-input {
+	font-family: var(--font-mono);
+	font-size: 0.88rem;
+}
+
+.backup-wizard .field-error {
+	display: block;
+	color: var(--engram-danger);
+	font-size: 0.84rem;
+	line-height: 1.5;
+}
+
+.backup-wizard-fields {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	gap: 0.85rem 1rem;
+	margin-bottom: 1rem;
+}
+
+.backup-wizard-fields.is-wide {
+	grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+}
+
+.backup-wizard .backup-path-preview {
+	background: var(--tm-surface);
+}
+
+.backup-keys-callout {
+	display: grid;
+	grid-template-columns: 2.25rem minmax(0, 1fr);
+	gap: 0.85rem;
+	align-items: start;
+	margin-bottom: 1.2rem;
+	padding: 0.95rem 1rem;
+	border: 1px solid var(--tm-border);
+	border-left: 2px solid var(--engram-info);
+	border-radius: var(--shape-medium);
+	background: var(--tm-surface);
+}
+
+.backup-keys-icon {
+	display: grid;
+	place-items: center;
+	width: 2.25rem;
+	height: 2.25rem;
+	border-radius: var(--shape-full);
+	background: var(--engram-surface-raised);
+	color: var(--engram-info);
+}
+
+.backup-keys-callout p {
+	margin: 0 0 0.35rem;
+	color: var(--engram-text-soft);
+	font-size: 0.9rem;
+}
+
+.backup-keys-callout p:last-child {
+	margin: 0;
+}
+
+.backup-keys-callout strong {
+	color: var(--engram-text);
+}
+
+.backup-step-nav {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-between;
+	align-items: center;
+	gap: 1rem;
+	margin-top: 1.4rem;
+	padding-top: 1.1rem;
+	border-top: 1px solid var(--tm-border-soft);
+}
+
+.backup-step-nav .muted {
+	margin: 0;
+}
+
+.backup-step-nav button,
+.backup-step-actions button {
+	width: auto;
+	margin: 0;
+}
+
+.backup-step-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.65rem;
+	margin-left: auto;
+}
+
+.backup-wizard-result:empty {
+	display: none;
+}
+
+.backup-wizard-result .alert {
+	margin: 0;
+}
+
+.backup-wizard-result .alert a {
+	white-space: nowrap;
+}
+
+.backup-wizard-save-note {
+	margin: 0.75rem 0 0;
+}
+
+.backup-rail {
+	position: sticky;
+	top: 1rem;
+	display: grid;
+	gap: 0.9rem;
+	padding: 1.1rem;
+	border: 1px solid var(--tm-border);
+	border-radius: var(--shape-medium);
+	background: var(--tm-surface);
+}
+
+.backup-rail h5 {
+	margin: 0;
+	font-size: 0.72rem;
+	font-weight: 400;
+	letter-spacing: 0.18em;
+	text-transform: uppercase;
+	color: var(--st-pink);
+}
+
+.backup-rail dl {
+	display: grid;
+	gap: 0.55rem;
+	margin: 0;
+}
+
+.backup-rail dt {
+	font-size: 0.72rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--engram-muted);
+}
+
+.backup-rail dd {
+	margin: 0;
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+	overflow-wrap: anywhere;
+}
+
+.backup-rail dd.is-pending {
+	color: var(--engram-muted);
+	font-family: var(--font-sans);
+	font-style: italic;
+}
+
+.backup-rail-edit {
+	margin-left: 0.4rem;
+	font-size: 0.8rem;
+	letter-spacing: 0;
+	text-transform: none;
+}
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+.backup-wizard.is-stepped .backup-step-panel:not([hidden]) {
+	animation: backup-step-in 160ms var(--shape-easing);
+}
+
+@keyframes backup-step-in {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+}
+
+@media (max-width: 900px) {
+	.backup-stepper {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.backup-stepper li::after {
+		display: none;
+	}
+
+	.backup-wizard-body,
+	.backup-wizard-fields,
+	.backup-wizard-fields.is-wide {
+		grid-template-columns: 1fr;
+	}
+
+	.backup-rail {
+		position: static;
+	}
+}
+
+@media (max-width: 560px) {
+	.backup-stepper {
+		grid-template-columns: 1fr;
+	}
+
+	.backup-wizard .backup-step-panel {
+		padding: 1rem;
+	}
+
+	.backup-step-nav {
+		flex-direction: column-reverse;
+		align-items: stretch;
+	}
+
+	.backup-step-actions {
+		flex-direction: column-reverse;
+		margin-left: 0;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.backup-wizard.is-stepped .backup-step-panel:not([hidden]) {
+		animation: none;
+	}
+}
+
+/* Storage choice (S3-compatible, Dropbox, Google Drive): a segmented row of
+   plain links, like the admin sub-nav, above the destination form. */
+
+.backup-storage-pick {
+	margin: 0.85rem 0 1rem;
+}
+
+.backup-storage-label {
+	margin: 0 0 0.35rem;
+	color: var(--engram-muted);
+	font-size: 0.84rem;
+	font-weight: 600;
+}
+
+.backup-storage-options {
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 2px;
+	padding: 3px;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-full);
+	background: var(--engram-surface);
+}
+
+.backup-storage-options a {
+	display: inline-flex;
+	align-items: center;
+	min-height: 2.25rem;
+	padding: 0.45rem 1rem;
+	border-radius: var(--shape-full);
+	color: var(--engram-muted);
+	font-size: 0.85rem;
+	line-height: 1.2;
+	text-decoration: none;
+	transition: color 150ms ease, background 150ms ease;
+}
+
+.backup-storage-options a:hover {
+	color: var(--engram-text);
+}
+
+.backup-storage-options a.active {
+	background: var(--engram-primary);
+	color: var(--st-base);
+	font-weight: 600;
+}
+
+.backup-storage-pick > .hint {
+	display: block;
+	margin: 0.35rem 0 0;
+}
+
+/* Explanatory note without controls (Google Drive needs
+   ENGRAM_CLOUD_PUBLIC_URL before Connect with Google can render). */
+
+.backup-note {
+	margin: 0.5rem 0;
+	padding: 0.8rem 1.1rem;
+	border-left: 2px solid var(--engram-info);
+	border-radius: var(--shape-medium);
+	background: var(--tm-surface);
+	color: var(--engram-text-soft);
+}
+
+.backup-note p {
+	margin: 0;
+}
+
+/* Google Drive form: the exact redirect URI to register with Google. */
+
+.backup-redirect-uri p {
+	margin: 0 0 0.35rem;
+}
+
+.backup-redirect-uri code {
+	display: inline-block;
+	max-width: 100%;
+	overflow-wrap: anywhere;
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+}
+
+/* Dropbox form: collapsed setup guide and the Save / Test actions. */
+
+details.backup-help {
+	margin: 1rem 0 0;
+	padding-top: 0.5rem;
+	border-top: 1px solid var(--tm-border-soft);
+	border-bottom: 0;
+}
+
+details.backup-help > summary {
+	display: flex;
+	align-items: center;
+	min-height: 2.75rem;
+	color: var(--engram-primary);
+	font-size: 0.9rem;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+details.backup-help > summary:hover {
+	color: var(--engram-primary-hover);
+}
+
+.backup-help-steps {
+	margin: 0.5rem 0 0;
+	padding-left: 1.25rem;
+	color: var(--engram-text-soft);
+	font-size: 0.9rem;
+	line-height: 1.6;
+}
+
+.backup-help-steps li + li {
+	margin-top: 0.5rem;
+}
+
+.backup-help-code {
+	margin: 0.5rem 0;
+	padding: 0.65rem 0.85rem;
+	overflow-x: auto;
+	border: 1px solid var(--engram-border);
+	border-radius: var(--shape-medium);
+	background: var(--engram-surface);
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+	white-space: pre;
+}
+
+.backup-help-code code {
+	padding: 0;
+	background: transparent;
+	overflow-wrap: anywhere;
+}
+
+/* Save is first in the DOM (Enter saves); Test connection shows first. */
+.backup-dropbox-actions {
+	display: flex;
+	flex-direction: row-reverse;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+}
+
+.backup-dropbox-actions button {
+	width: auto;
+	margin: 0;
+}
+
+@media (max-width: 560px) {
+	.backup-dropbox-actions {
+		flex-direction: column;
+		align-items: stretch;
+	}
+}

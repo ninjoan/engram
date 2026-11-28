@@ -86,6 +86,33 @@ type CloudServer struct {
 	maxPushBodyBytes    int64
 	mux                 *http.ServeMux
 	syncStatus          dashboard.SyncStatusProvider
+	// backupSource is the snapshot surface the dashboard backup download
+	// exports from (the chunk store when it satisfies BackupSource);
+	// backupExport overrides the export itself and is a test seam only.
+	backupSource BackupSource
+	backupExport func(ctx context.Context, w io.Writer) error
+	// backupSettings, backupKey and backupRunner back the Backups page
+	// settings routes (dashboard_backup_settings.go). backupCheckAccess
+	// overrides the destination access check and backupNow the clock used
+	// for the next scheduled run; both are test seams only.
+	// backupCheckDropbox overrides the Dropbox access check and
+	// backupDropboxHTTPClient the HTTP client of the real one; both are
+	// test seams only.
+	backupSettings          BackupSettingsStore
+	backupKey               BackupKey
+	backupRunner            BackupRunner
+	backupCheckAccess       func(ctx context.Context, creds cloudstore.BackupDestinationCredentials) error
+	backupCheckDropbox      func(ctx context.Context, creds cloudstore.DropboxDestinationCredentials) error
+	backupDropboxHTTPClient *http.Client
+	backupNow               func() time.Time
+	// publicURL is ENGRAM_CLOUD_PUBLIC_URL, the only base of the Google
+	// Drive OAuth redirect URI (dashboard_backup_gdrive.go); empty disables
+	// Connect with Google. backupCheckGDrive overrides the Drive access
+	// check and backupGDriveHTTPClient the HTTP client of the token exchange
+	// and of the real check; both are test seams only.
+	publicURL              string
+	backupCheckGDrive      func(ctx context.Context, creds cloudstore.GDriveDestinationCredentials) error
+	backupGDriveHTTPClient *http.Client
 	// version is the optional running build identifier surfaced in the
 	// dashboard chrome (Layout footer + LoginPage). An empty identifier is
 	// displayed as "version unknown" on both surfaces.
@@ -233,6 +260,9 @@ func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *Clo
 	if principalState, ok := store.(principalStateStore); ok {
 		s.principalState = principalState
 	}
+	if backupSource, ok := store.(BackupSource); ok {
+		s.backupSource = backupSource
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -351,6 +381,30 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("POST /dashboard/admin/tokens/{tokenID}/revoke", s.requireDashboardSession(s.handleDashboardRevokeManagedToken))
 	s.mux.HandleFunc("POST /dashboard/admin/users/{principalID}/grants", s.requireDashboardSession(s.handleDashboardCreateManagedGrant))
 	s.mux.HandleFunc("POST /dashboard/admin/users/{principalID}/grants/{project}/revoke", s.requireDashboardSession(s.handleDashboardRevokeManagedGrant))
+	// Backups page, on-demand download (dashboard_backup.go), backup
+	// settings (dashboard_backup_settings.go) and Connect with Google
+	// (dashboard_backup_gdrive.go). Every mutation is POST only,
+	// managed admin only, same-origin checked and audited; GET on a mutation
+	// path answers 405. No import/restore route exists by design.
+	s.mux.HandleFunc("GET /dashboard/admin/backups", s.requireDashboardSession(s.handleDashboardBackupsPage))
+	for path, handler := range map[string]http.HandlerFunc{
+		"/dashboard/admin/backups/download":           s.handleDashboardBackupDownload,
+		"/dashboard/admin/backups/destination":        s.handleDashboardSaveBackupDestination,
+		"/dashboard/admin/backups/destination/test":   s.handleDashboardTestBackupDestination,
+		"/dashboard/admin/backups/destination/remove": s.handleDashboardRemoveBackupDestination,
+		"/dashboard/admin/backups/destination/check":  s.handleDashboardCheckBackupDestination,
+		"/dashboard/admin/backups/schedule":           s.handleDashboardSaveBackupSchedule,
+		"/dashboard/admin/backups/run":                s.handleDashboardBackupNow,
+		"/dashboard/admin/backups/gdrive/connect":     s.handleDashboardConnectGDrive,
+	} {
+		s.mux.HandleFunc("POST "+path, s.requireDashboardSession(requireSameOriginDashboardMutation(handler)))
+		s.mux.HandleFunc("GET "+path, s.requireDashboardSession(s.handleDashboardBackupMethodNotAllowed))
+	}
+	// Google redirects the browser here after "Connect with Google": a
+	// top-level cross-site GET, so it has no same-origin check; it checks
+	// its own session (without echoing the query into the login redirect),
+	// requires a managed admin and validates the single-use state.
+	s.mux.HandleFunc("GET "+backupGDriveCallbackPath, s.handleDashboardGDriveCallback)
 	s.mux.HandleFunc("GET /sync/pull", s.withAuth(s.handlePullManifest))
 	s.mux.HandleFunc("GET /sync/pull/{chunkID}", s.withAuth(s.handlePullChunk))
 	s.mux.HandleFunc("POST /sync/push", s.withAuth(s.handlePushChunk))

@@ -187,6 +187,9 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("GET /dashboard/admin/users", h.requireScopedSession((*handlers).handleAdminUsers))
 	mux.HandleFunc("GET /dashboard/admin/users/list", h.requireScopedSession((*handlers).handleAdminUsersList))
 	mux.HandleFunc("GET /dashboard/admin/health", h.requireScopedSession((*handlers).handleAdminHealth))
+	// GET /dashboard/admin/backups and every backup mutation route are owned
+	// by internal/cloud/cloudserver (backup settings store, managed-admin gate,
+	// same-origin check, audit); this package only renders AdminBackupsPage.
 	// Sync controls are mutations, not dashboard reads. Keep their established
 	// admin-only store semantics outside request read scoping.
 	mux.HandleFunc("POST /dashboard/admin/projects/{name}/sync", h.requireSession(h.handleAdminSyncTogglePost))

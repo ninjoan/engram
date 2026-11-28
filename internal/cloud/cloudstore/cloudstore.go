@@ -933,6 +933,105 @@ func (cs *CloudStore) migrateSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_audit_log_occurred_at ON cloud_sync_audit_log (occurred_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_log_contributor_project ON cloud_sync_audit_log (contributor, project)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_log_outcome ON cloud_sync_audit_log (outcome)`,
+		// cloud_backup_destinations: the single external backup destination.
+		// Credentials are sealed with ENGRAM_CLOUD_BACKUP_KEY (see
+		// backup_destination.go); the table is never exported in a backup.
+		// kind selects the columns in use: s3 uses endpoint..secret_access_key_ciphertext;
+		// dropbox and gdrive use client_id (app key / OAuth client id, not
+		// secret), folder, client_secret_ciphertext and
+		// refresh_token_ciphertext (empty for gdrive until authorized).
+		`CREATE TABLE IF NOT EXISTS cloud_backup_destinations (
+			id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+			kind TEXT NOT NULL CONSTRAINT cloud_backup_destinations_kind_check CHECK (kind IN ('s3', 'dropbox', 'gdrive')),
+			endpoint TEXT NOT NULL,
+			region TEXT NOT NULL,
+			bucket TEXT NOT NULL,
+			prefix TEXT NOT NULL DEFAULT '',
+			access_key_id_hint TEXT NOT NULL DEFAULT '',
+			access_key_id_ciphertext TEXT NOT NULL,
+			secret_access_key_ciphertext TEXT NOT NULL,
+			key_fingerprint TEXT NOT NULL,
+			updated_by_principal_id BIGINT REFERENCES cloud_principals(id) ON DELETE SET NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			client_id TEXT NOT NULL DEFAULT '',
+			folder TEXT NOT NULL DEFAULT '',
+			client_secret_ciphertext TEXT NOT NULL DEFAULT '',
+			refresh_token_ciphertext TEXT NOT NULL DEFAULT '',
+			CONSTRAINT cloud_backup_destinations_kind_shape_check CHECK (` + backupDestinationKindShapeCheck + `)
+		)`,
+		// Tables created before Dropbox and Google Drive destinations hold
+		// only S3 rows: add the new columns (empty for those rows), widen
+		// the kind check and add the per-kind shape check. NOT VALID keeps a
+		// startup from failing on an unexpected legacy row; new writes are
+		// still checked. Every step is a no-op on an up-to-date table.
+		`ALTER TABLE cloud_backup_destinations ADD COLUMN IF NOT EXISTS client_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cloud_backup_destinations ADD COLUMN IF NOT EXISTS folder TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cloud_backup_destinations ADD COLUMN IF NOT EXISTS client_secret_ciphertext TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE cloud_backup_destinations ADD COLUMN IF NOT EXISTS refresh_token_ciphertext TEXT NOT NULL DEFAULT ''`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid = 'cloud_backup_destinations'::regclass
+				AND conname = 'cloud_backup_destinations_kind_check'
+				AND pg_get_constraintdef(oid) LIKE '%gdrive%'
+			) THEN
+				ALTER TABLE cloud_backup_destinations DROP CONSTRAINT IF EXISTS cloud_backup_destinations_kind_check;
+				ALTER TABLE cloud_backup_destinations ADD CONSTRAINT cloud_backup_destinations_kind_check CHECK (kind IN ('s3', 'dropbox', 'gdrive'));
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid = 'cloud_backup_destinations'::regclass
+				AND conname = 'cloud_backup_destinations_kind_shape_check'
+			) THEN
+				ALTER TABLE cloud_backup_destinations ADD CONSTRAINT cloud_backup_destinations_kind_shape_check CHECK (` + backupDestinationKindShapeCheck + `) NOT VALID;
+			END IF;
+		END $$`,
+		// cloud_backup_schedule: the single weekday/time schedule for uploads
+		// to the destination (see backup_schedule.go). weekdays is a bitmask,
+		// bit n = time.Weekday n. Never exported in a backup.
+		`CREATE TABLE IF NOT EXISTS cloud_backup_schedule (
+			id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+			enabled BOOLEAN NOT NULL DEFAULT FALSE,
+			weekdays SMALLINT NOT NULL DEFAULT 0 CHECK (weekdays BETWEEN 0 AND 127),
+			time_of_day TEXT NOT NULL CHECK (time_of_day ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'),
+			timezone TEXT NOT NULL CHECK (timezone <> ''),
+			updated_by_principal_id BIGINT REFERENCES cloud_principals(id) ON DELETE SET NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CHECK (NOT enabled OR weekdays > 0)
+		)`,
+		// cloud_backup_runs: history of uploads to the destination (see
+		// backup_runs.go). A scheduled slot is recorded at most once. Never
+		// exported in a backup.
+		`CREATE TABLE IF NOT EXISTS cloud_backup_runs (
+			id BIGSERIAL PRIMARY KEY,
+			trigger TEXT NOT NULL CHECK (trigger IN ('scheduled', 'manual')),
+			scheduled_for TIMESTAMPTZ,
+			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			finished_at TIMESTAMPTZ,
+			status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failure')),
+			object_key TEXT NOT NULL DEFAULT '',
+			size_bytes BIGINT NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+			error_message TEXT NOT NULL DEFAULT '' CHECK (octet_length(error_message) <= 512),
+			actor_principal_id BIGINT REFERENCES cloud_principals(id) ON DELETE SET NULL,
+			CHECK ((trigger = 'scheduled') = (scheduled_for IS NOT NULL)),
+			CHECK ((status = 'running') = (finished_at IS NULL))
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS cloud_backup_runs_scheduled_uidx ON cloud_backup_runs (scheduled_for) WHERE trigger = 'scheduled'`,
+		`CREATE INDEX IF NOT EXISTS idx_cloud_backup_runs_started_at ON cloud_backup_runs (started_at DESC, id DESC)`,
+		// cloud_backup_oauth_states: pending "Connect with Google"
+		// authorizations (see backup_oauth.go). Only the SHA-256 of a state is
+		// stored; the PKCE verifier is sealed with ENGRAM_CLOUD_BACKUP_KEY.
+		// Rows are single use and short lived; never exported in a backup.
+		`CREATE TABLE IF NOT EXISTS cloud_backup_oauth_states (
+			state_hash TEXT PRIMARY KEY CHECK (state_hash ~ '^[0-9a-f]{64}$'),
+			principal_id BIGINT NOT NULL REFERENCES cloud_principals(id) ON DELETE CASCADE,
+			destination_binding TEXT NOT NULL CHECK (destination_binding <> ''),
+			verifier_ciphertext TEXT NOT NULL CHECK (verifier_ciphertext <> ''),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMPTZ NOT NULL,
+			CHECK (expires_at > created_at)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cloud_backup_oauth_states_principal ON cloud_backup_oauth_states (principal_id, created_at DESC)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {

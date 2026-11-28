@@ -719,7 +719,7 @@ templ ContributorDetailPage(contributor *cloudstore.DashboardContributorRow, ses
 // ─── Phase 8: Admin Views ───────────────────────────────────────────────────
 
 // adminNav renders the shared admin sub-navigation bar.
-// active should be one of: "overview", "projects", "users", "health", "audit-log".
+// active should be one of: "overview", "projects", "users", "backups", "health", "audit-log".
 templ adminNav(active string) {
 	<div class="admin-nav">
 		if active == "overview" {
@@ -736,6 +736,11 @@ templ adminNav(active string) {
 			<a href="/dashboard/admin/users" class="active">Managed Users</a>
 		} else {
 			<a href="/dashboard/admin/users">Managed Users</a>
+		}
+		if active == "backups" {
+			<a href="/dashboard/admin/backups" class="active">Backups</a>
+		} else {
+			<a href="/dashboard/admin/backups">Backups</a>
 		}
 		if active == "health" {
 			<a href="/dashboard/admin/health" class="active">System Health</a>

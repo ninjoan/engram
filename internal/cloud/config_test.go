@@ -1,6 +1,58 @@
 package cloud
 
-import "testing"
+import (
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/backupcrypto"
+)
+
+func TestConfigFromEnvBackupKey(t *testing.T) {
+	t.Run("absent disables the feature without an error", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_BACKUP_KEY", " ")
+		cfg := ConfigFromEnv()
+		if cfg.BackupKey != nil || cfg.BackupKeyError != nil {
+			t.Fatalf("blank key = (%v, %v), want (nil, nil)", cfg.BackupKey, cfg.BackupKeyError)
+		}
+	})
+
+	t.Run("valid key is parsed and independent from other secrets", func(t *testing.T) {
+		encoded := hex.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+		t.Setenv("ENGRAM_CLOUD_BACKUP_KEY", encoded)
+		t.Setenv("ENGRAM_JWT_SECRET", "session-signing-secret")
+		t.Setenv("ENGRAM_CLOUD_TOKEN_PEPPER", "dedicated-cloud-token-pepper")
+		cfg := ConfigFromEnv()
+		if cfg.BackupKeyError != nil || cfg.BackupKey == nil {
+			t.Fatalf("valid key = (%v, %v)", cfg.BackupKey, cfg.BackupKeyError)
+		}
+		if _, err := backupcrypto.NewSealer(cfg.BackupKey); err != nil {
+			t.Fatalf("parsed key cannot seal: %v", err)
+		}
+		if cfg.TokenPepper != "dedicated-cloud-token-pepper" || cfg.JWTSecret != "session-signing-secret" {
+			t.Fatalf("backup key changed other secrets: pepper %q jwt %q", cfg.TokenPepper, cfg.JWTSecret)
+		}
+		if out := fmt.Sprintf("%+v %#v", cfg, cfg); strings.Contains(out, "0123456789abcdef") || strings.Contains(out, encoded[:16]) {
+			t.Fatalf("formatted config leaks the backup key: %s", out)
+		}
+	})
+
+	t.Run("invalid key is reported, not silently ignored", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_BACKUP_KEY", "too-short-key")
+		cfg := ConfigFromEnv()
+		if cfg.BackupKey != nil {
+			t.Fatalf("invalid key produced a key")
+		}
+		if !errors.Is(cfg.BackupKeyError, backupcrypto.ErrInvalidKey) {
+			t.Fatalf("BackupKeyError = %v, want %v", cfg.BackupKeyError, backupcrypto.ErrInvalidKey)
+		}
+		if strings.Contains(cfg.BackupKeyError.Error(), "too-short-key") {
+			t.Fatalf("error %q echoes the configured key", cfg.BackupKeyError)
+		}
+	})
+}
 
 func TestConfigFromEnvStartupReceiptDir(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_STARTUP_RECEIPT_DIR", " ")
@@ -109,4 +161,67 @@ func TestIsDefaultJWTSecret(t *testing.T) {
 			t.Fatal("expected custom jwt secret to be treated as non-default")
 		}
 	})
+}
+
+// S15: ENGRAM_CLOUD_PUBLIC_URL is the dashboard's public origin, the base of
+// the Google OAuth redirect URI. It must be an https origin (http only for a
+// loopback host) without path, query, fragment or userinfo; it is
+// normalized to scheme://host[:port]. An invalid value is reported, never
+// silently dropped.
+func TestConfigFromEnvPublicURL(t *testing.T) {
+	t.Run("absent leaves it empty without an error", func(t *testing.T) {
+		t.Setenv("ENGRAM_CLOUD_PUBLIC_URL", " ")
+		cfg := ConfigFromEnv()
+		if cfg.PublicURL != "" || cfg.PublicURLError != nil {
+			t.Fatalf("blank public URL = (%q, %v)", cfg.PublicURL, cfg.PublicURLError)
+		}
+	})
+	for raw, want := range map[string]string{
+		"https://engram.example.com":       "https://engram.example.com",
+		" https://Engram.Example.com/ ":    "https://engram.example.com",
+		"HTTPS://engram.example.com:8443":  "https://engram.example.com:8443",
+		"http://localhost:8080":            "http://localhost:8080",
+		"http://127.0.0.1:18080/":          "http://127.0.0.1:18080",
+		"http://[::1]:8080":                "http://[::1]:8080",
+		"https://192.0.2.10":               "https://192.0.2.10",
+		"https://engram.example.com:443/":  "https://engram.example.com:443",
+		"http://LOCALHOST":                 "http://localhost",
+		"https://xn--engrm-sqa.example.io": "https://xn--engrm-sqa.example.io",
+	} {
+		t.Run("valid "+raw, func(t *testing.T) {
+			t.Setenv("ENGRAM_CLOUD_PUBLIC_URL", raw)
+			cfg := ConfigFromEnv()
+			if cfg.PublicURLError != nil || cfg.PublicURL != want {
+				t.Fatalf("public URL %q = (%q, %v), want %q", raw, cfg.PublicURL, cfg.PublicURLError, want)
+			}
+		})
+	}
+	for _, raw := range []string{
+		"engram.example.com",
+		"http://engram.example.com",
+		"http://192.0.2.10:8080",
+		"ftp://engram.example.com",
+		"https://",
+		"https://engram.example.com/dashboard",
+		"https://engram.example.com/?x=1",
+		"https://engram.example.com?",
+		"https://engram.example.com/#frag",
+		"https://user:pass@engram.example.com",
+		"https://engram.example.com:notaport",
+		"https://engram.example.com:0",
+		"https://engram.example.com:70000",
+		"https://exa mple.com",
+		"//engram.example.com",
+	} {
+		t.Run("invalid "+raw, func(t *testing.T) {
+			t.Setenv("ENGRAM_CLOUD_PUBLIC_URL", raw)
+			cfg := ConfigFromEnv()
+			if cfg.PublicURL != "" || !errors.Is(cfg.PublicURLError, ErrInvalidPublicURL) {
+				t.Fatalf("public URL %q = (%q, %v), want %v", raw, cfg.PublicURL, cfg.PublicURLError, ErrInvalidPublicURL)
+			}
+			if strings.Contains(cfg.PublicURLError.Error(), "pass@") {
+				t.Fatalf("error %q echoes userinfo", cfg.PublicURLError)
+			}
+		})
+	}
 }

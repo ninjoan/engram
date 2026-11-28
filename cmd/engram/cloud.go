@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -15,6 +17,8 @@ import (
 
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/backupcrypto"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/backuprunner"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudserver"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/constants"
@@ -73,10 +77,25 @@ type cloudServerRuntime interface {
 type defaultCloudRuntime struct {
 	server *cloudserver.CloudServer
 	store  *cloudstore.CloudStore
+	// backups runs scheduled and manual backups; nil without
+	// ENGRAM_CLOUD_BACKUP_KEY.
+	backups *backuprunner.Runner
 }
 
+// Start serves until the startup listener stops. The backup runner starts
+// first (so "Back up now" works once routes are published) and, on shutdown,
+// is canceled and waited for, so an in-flight run records its result before
+// the store is closed.
 func (r *defaultCloudRuntime) Start(startup *cloudserver.StartupListener) error {
 	defer r.store.Close()
+	if r.backups != nil {
+		ctx, cancel := context.WithCancel(startup.InitializationContext())
+		r.backups.Start(ctx)
+		defer func() {
+			cancel()
+			r.backups.Wait()
+		}()
+	}
 	return r.server.Start(startup)
 }
 
@@ -107,15 +126,114 @@ func newCloudRuntimeWithReceipt(ctx context.Context, cfg cloud.Config, verifier 
 		_ = cs.Close()
 		return nil, err
 	}
+	runtime, err := assembleCloudRuntime(cfg, cs, allowedProjects, authenticator, managedHasher)
+	if err != nil {
+		return nil, err
+	}
+	return runtime, nil
+}
+
+// assembleCloudRuntime builds the server over an opened store, appending the
+// backup wiring to the server options. It closes cs when it fails.
+func assembleCloudRuntime(cfg cloud.Config, cs *cloudstore.CloudStore, allowedProjects []string, authenticator cloudserver.Authenticator, managedHasher *auth.ManagedTokenHasher) (*defaultCloudRuntime, error) {
+	backups, err := cloudRuntimeBackupOptions(cfg, cs)
+	if err != nil {
+		_ = cs.Close()
+		return nil, err
+	}
+	options := append(cloudRuntimeServerOptions(cfg, cs, allowedProjects, authenticator, managedHasher, cs), backups.options...)
 	return &defaultCloudRuntime{
-		server: cloudserver.New(
-			cs,
-			authenticator,
-			cfg.Port,
-			cloudRuntimeServerOptions(cfg, cs, allowedProjects, authenticator, managedHasher, cs)...,
-		),
-		store: cs,
+		server:  cloudserver.New(cs, authenticator, cfg.Port, options...),
+		store:   cs,
+		backups: backups.runner,
 	}, nil
+}
+
+// cloudRuntimeBackups is the backup wiring of cloud serve: the server
+// options, the sealer of the destination credentials and the backup runner.
+type cloudRuntimeBackups struct {
+	options []cloudserver.Option
+	// sealer is nil without ENGRAM_CLOUD_BACKUP_KEY: the settings are
+	// read-only.
+	sealer *backupcrypto.Sealer
+	// runner is nil without ENGRAM_CLOUD_BACKUP_KEY: no scheduled backups
+	// and no "Back up now" button.
+	runner *backuprunner.Runner
+}
+
+// cloud.Config carries the parsed ENGRAM_CLOUD_BACKUP_KEY; the key must stay
+// a fmt.Formatter that redacts itself so a logged config never prints it.
+var _ = fmt.Formatter(backupcrypto.Key{})
+
+// newCloudBackupSealer builds the sealer of ENGRAM_CLOUD_BACKUP_KEY; tests
+// replace it to reach the failure branch a parsed key cannot trigger.
+var newCloudBackupSealer = backupcrypto.NewSealer
+
+// cloudRuntimeBackupOptions wires the dashboard backup settings (external
+// destination, schedule, run history) and the backup runner to the store.
+// Without ENGRAM_CLOUD_BACKUP_KEY the settings are shown read-only with an
+// explanation and no runner exists; a set but invalid key is a startup
+// error, never a silently disabled feature.
+func cloudRuntimeBackupOptions(cfg cloud.Config, cs *cloudstore.CloudStore) (cloudRuntimeBackups, error) {
+	if err := cloudServeBackupKeyError(cfg); err != nil {
+		return cloudRuntimeBackups{}, err
+	}
+	if err := cloudServePublicURLError(cfg); err != nil {
+		return cloudRuntimeBackups{}, err
+	}
+	if cfg.BackupKey == nil {
+		return cloudRuntimeBackups{options: []cloudserver.Option{cloudserver.WithBackupSettings(cs, nil)}}, nil
+	}
+	sealer, err := newCloudBackupSealer(cfg.BackupKey)
+	if err != nil {
+		return cloudRuntimeBackups{}, cloudServeBackupKeyRefusal(err)
+	}
+	runner, err := backuprunner.New(cloudBackupRunnerConfig(cs, sealer))
+	if err != nil {
+		return cloudRuntimeBackups{}, fmt.Errorf("cloud serve: refusing to start: backup runner: %w", err)
+	}
+	return cloudRuntimeBackups{
+		options: []cloudserver.Option{cloudserver.WithBackupSettings(cs, sealer), cloudserver.WithBackupRunner(runner)},
+		sealer:  sealer,
+		runner:  runner,
+	}, nil
+}
+
+// cloudBackupRunnerConfig is the backup runner of cloud serve: S3, Dropbox
+// and Google Drive uploaders. A Google Drive destination whose "Connect with
+// Google" authorization is pending is recorded as skipped by the runner.
+func cloudBackupRunnerConfig(cs *cloudstore.CloudStore, sealer *backupcrypto.Sealer) backuprunner.Config {
+	return backuprunner.Config{
+		Store: cs, Key: sealer, EngramVersion: version,
+		NewS3Client:        backuprunner.NewS3Client,
+		NewDropboxUploader: backuprunner.NewDropboxUploader,
+		NewGDriveUploader:  backuprunner.NewGDriveUploader,
+	}
+}
+
+// cloudServePublicURLError reports a set but invalid ENGRAM_CLOUD_PUBLIC_URL
+// as a startup refusal: the Google Drive OAuth redirect URI is built from
+// it, so a bad value is never dropped silently.
+func cloudServePublicURLError(cfg cloud.Config) error {
+	if cfg.PublicURLError == nil {
+		return nil
+	}
+	return fmt.Errorf("cloud serve: refusing to start: %w; unset it to disable Connect with Google", cfg.PublicURLError)
+}
+
+// cloudServeBackupKeyError reports a set but invalid ENGRAM_CLOUD_BACKUP_KEY.
+// The error never contains the key.
+func cloudServeBackupKeyError(cfg cloud.Config) error {
+	if cfg.BackupKeyError == nil {
+		return nil
+	}
+	return cloudServeBackupKeyRefusal(cfg.BackupKeyError)
+}
+
+// cloudServeBackupKeyRefusal is the startup refusal for an unusable
+// ENGRAM_CLOUD_BACKUP_KEY; cause never contains the key.
+func cloudServeBackupKeyRefusal(cause error) error {
+	return fmt.Errorf("cloud serve: refusing to start: invalid ENGRAM_CLOUD_BACKUP_KEY (%w); set 32 random bytes as hex or base64, for example from `openssl rand -hex 32`, or unset it to disable scheduled backups", cause)
 }
 
 func cloudRuntimeServerOptions(cfg cloud.Config, cs *cloudstore.CloudStore, allowedProjects []string, authenticator cloudserver.Authenticator, managedHasher *auth.ManagedTokenHasher, grantStore cloudProjectGrantStore) []cloudserver.Option {
@@ -129,6 +247,9 @@ func cloudRuntimeServerOptions(cfg cloud.Config, cs *cloudstore.CloudStore, allo
 		cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 		cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
 		cloudserver.WithVersion(version),
+		// ENGRAM_CLOUD_PUBLIC_URL (validated at startup) is the only base of
+		// the Google Drive OAuth redirect URI.
+		cloudserver.WithPublicURL(cfg.PublicURL),
 	}
 	if authenticator != nil {
 		options = append(options, cloudserver.WithPrincipalProjectAuthorizer(cloudPrincipalProjectAuthorizer{store: grantStore}))
@@ -244,12 +365,12 @@ var runUpgradeRemirror = func(s *store.Store, project string, cc *cloudconfig.Co
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, unenroll, config, serve, upgrade, repair, bootstrap, attest-prompt-source")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, unenroll, config, serve, upgrade, repair, bootstrap, backup, attest-prompt-source")
 		exitFunc(1)
 	}
 	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
 		fmt.Println("usage: engram cloud <subcommand> [options]")
-		fmt.Println("supported subcommands: status, enroll, unenroll, config, serve, upgrade, repair, bootstrap, attest-prompt-source")
+		fmt.Println("supported subcommands: status, enroll, unenroll, config, serve, upgrade, repair, bootstrap, backup, attest-prompt-source")
 		return
 	}
 
@@ -270,11 +391,13 @@ func cmdCloud(cfg store.Config) {
 		cmdCloudRepair()
 	case "bootstrap":
 		cmdCloudBootstrap()
+	case "backup":
+		cmdCloudBackup()
 	case "attest-prompt-source":
 		cmdCloudAttestPromptSource(cfg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cloud command: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, unenroll, config, serve, upgrade, repair, bootstrap, attest-prompt-source")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, unenroll, config, serve, upgrade, repair, bootstrap, backup, attest-prompt-source")
 		exitFunc(1)
 	}
 }
@@ -1073,22 +1196,68 @@ func cmdCloudServe() {
 
 var listenCloudDuringStartup = net.Listen
 
+// runCloudServe serves until the listener fails or the process receives
+// SIGINT or SIGTERM. A signal closes the listener, so the runtime runs its
+// shutdown path (a backup in progress is canceled, its temp file removed
+// and its result recorded) and runCloudServe returns nil, unless the
+// runtime or its initialization failed for a reason other than the
+// shutdown. A second signal during that shutdown stops the process at once.
 func runCloudServe(cfg cloud.Config) error {
+	// Refuse before binding the port: an invalid backup key or public URL
+	// must not leave a server running with scheduled backups or Connect with
+	// Google silently disabled.
+	if err := cloudServeBackupKeyError(cfg); err != nil {
+		return err
+	}
+	if err := cloudServePublicURLError(cfg); err != nil {
+		return err
+	}
+	signaled, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	startup, err := cloudserver.ListenDuringStartup(cfg.BindHost, cfg.Port, listenCloudDuringStartup)
 	if err != nil {
 		return err
 	}
 	defer startup.Close()
 	ctx := startup.InitializationContext()
+	go func() {
+		select {
+		case <-signaled.Done():
+			stopSignals() // a second signal terminates the process
+			fmt.Fprintln(os.Stderr, "engram cloud serve: shutting down")
+			startup.Close()
+		case <-ctx.Done():
+		}
+	}()
 	runtime, err := newCloudRuntime(ctx, cfg)
 	if err != nil {
+		if signaled.Err() != nil {
+			if isCloudServeShutdownError(ctx, err) {
+				return nil
+			}
+			return err
+		}
 		if serveErr := context.Cause(ctx); serveErr != nil {
 			return serveErr
 		}
 		return err
 	}
 	fmt.Printf("Starting Engram cloud server on port %d\n", cfg.Port)
-	return runtime.Start(startup)
+	err = runtime.Start(startup)
+	if signaled.Err() != nil && isCloudServeShutdownError(ctx, err) {
+		return nil
+	}
+	return err
+}
+
+// isCloudServeShutdownError reports whether err is nil or was caused by the
+// shutdown that ended ctx (the closed listener or the canceled context).
+func isCloudServeShutdownError(ctx context.Context, err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, http.ErrServerClosed) {
+		return true
+	}
+	cause := context.Cause(ctx)
+	return cause != nil && errors.Is(err, cause)
 }
 
 func validateCloudServeAuthConfig() error {

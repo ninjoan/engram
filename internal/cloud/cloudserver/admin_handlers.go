@@ -17,6 +17,11 @@ import (
 
 const (
 	authAuditOutcomeSuccess = "success"
+	// authAuditOutcomeStarted marks an attempt whose result is recorded by a
+	// later completion event; authAuditOutcomeFailure is that result when the
+	// attempted operation did not finish.
+	authAuditOutcomeStarted = "started"
+	authAuditOutcomeFailure = "failure"
 
 	authAuditActionUserCreate  = "user.create"
 	authAuditActionUserEnable  = "user.enable"
@@ -25,6 +30,19 @@ const (
 	authAuditActionTokenRevoke = "token.revoke"
 	authAuditActionGrantCreate = "grant.create"
 	authAuditActionGrantRevoke = "grant.revoke"
+
+	authAuditActionBackupDownload         = "backup.download"
+	authAuditActionBackupDownloadComplete = "backup.download.complete"
+	// backup.destination.update/clear and backup.schedule.update are
+	// recorded by cloudstore in the same transaction as the change.
+	authAuditActionBackupDestinationTest = "backup.destination.test"
+	authAuditActionBackupRunManual       = "backup.run.manual"
+	// backup.destination.check is a test of submitted, unsaved fields.
+	authAuditActionBackupDestinationCheck = "backup.destination.check"
+	// backup.destination.authorize_start records a "Connect with Google"
+	// redirect; a successful backup.destination.authorize is recorded by
+	// cloudstore with the refresh token, a failed code exchange here.
+	authAuditActionBackupDestinationAuthorizeStart = "backup.destination.authorize_start"
 )
 
 // AdminIdentityStore is the storage boundary used by cloudserver admin API
