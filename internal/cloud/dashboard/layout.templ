@@ -13,9 +13,9 @@ templ Layout(title string, username string, activeTab string, isAdmin bool, vers
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ title } — Engram Cloud</title>
-			<link rel="stylesheet" href="/dashboard/static/pico.min.css"/>
-			<link rel="stylesheet" href="/dashboard/static/styles.css"/>
-			<script src="/dashboard/static/htmx.min.js"></script>
+			<link rel="stylesheet" href={ StaticURL("pico.min.css") }/>
+			<link rel="stylesheet" href={ StaticURL("styles.css") }/>
+			<script src={ StaticURL("htmx.min.js") }></script>
 		</head>
 		<body class="shell-body">
 			<div class="shell-backdrop">

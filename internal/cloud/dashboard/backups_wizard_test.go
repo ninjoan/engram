@@ -11,7 +11,7 @@ import (
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
 )
 
-const backupWizardScript = `<script src="/dashboard/static/backups-wizard.js" defer></script>`
+var backupWizardScript = `<script src="` + StaticURL("backups-wizard.js") + `" defer></script>`
 
 // backupFormBody returns the destination form that posts to the save route.
 func backupFormBody(t *testing.T, body string) string {

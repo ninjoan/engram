@@ -14,6 +14,7 @@ import (
 
 	cloudauth "github.com/Gentleman-Programming/engram/v3/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/cloudstore"
+	"github.com/Gentleman-Programming/engram/v3/internal/cloud/dashboard"
 	"github.com/Gentleman-Programming/engram/v3/internal/cloud/s3client"
 )
 
@@ -300,7 +301,7 @@ func TestDashboardCheckBackupDestinationOutboundOnlyForAllowedRequests(t *testin
 func TestDashboardBackupsPageEmptyStateRendersTheGuidedSetup(t *testing.T) {
 	f := emptyBackupFixture(t)
 	body := performDashboardRequest(f.srv, http.MethodGet, backupsPagePath, f.cookie).Body.String()
-	for _, marker := range []string{"data-backup-wizard", `<script src="/dashboard/static/backups-wizard.js" defer></script>`, `hx-post="/dashboard/admin/backups/destination/check"`, "Step 4 of 4 · Test &amp; save"} {
+	for _, marker := range []string{"data-backup-wizard", `<script src="` + dashboard.StaticURL("backups-wizard.js") + `" defer></script>`, `hx-post="/dashboard/admin/backups/destination/check"`, "Step 4 of 4 · Test &amp; save"} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("expected %q on the empty page, body=%q", marker, body)
 		}
