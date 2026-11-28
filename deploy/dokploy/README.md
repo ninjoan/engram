@@ -31,6 +31,34 @@ Generate each secret with `openssl rand -hex 32`. Never commit real values, and 
 | `ENGRAM_CLOUD_TOKEN` | secret bearer token shared with clients |
 | `ENGRAM_CLOUD_ALLOWED_PROJECTS` | comma-separated project names, e.g. `engram-staging-smoke` |
 
+## Dev instance (unreleased features, built from source)
+
+`docker-compose.dev.yml` builds `engram` from this branch on every Deploy, so you can try features before upstream ships them (currently: cloud backups to S3/R2, Dropbox and Google Drive). Production keeps `docker-compose.yml` and the official image.
+
+- Dokploy: Compose service, branch `personal/main`, compose path `./deploy/dokploy/docker-compose.dev.yml`, domain on service `cloud`, port `18080`, HTTPS on.
+- Use its own database (the compose has its own volume). Never point dev at production data: the dev build adds tables and columns that the official image does not know.
+
+| Key | Value |
+|---|---|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | as above, dev-only password |
+| `ENGRAM_JWT_SECRET` | secret (`openssl rand -hex 32`) |
+| `ENGRAM_CLOUD_TOKEN` | secret; still required for `cloud serve` to start |
+| `ENGRAM_CLOUD_TOKEN_PEPPER` | secret, distinct; enables managed admin tokens (needed for the backups page) |
+| `ENGRAM_CLOUD_ALLOWED_PROJECTS` | comma-separated projects |
+| `ENGRAM_CLOUD_BACKUP_KEY` | `openssl rand -base64 32`; seals destination credentials. Back it up separately: without it saved destinations cannot be opened |
+| `ENGRAM_CLOUD_PUBLIC_URL` | `https://<dev domain>` (no path); needed for Connect with Google |
+| `ENGRAM_BUILD_VERSION` | optional label |
+
+After the first deploy, create the managed admin from the Dokploy terminal of the `cloud` container:
+
+```sh
+engram cloud bootstrap admin --username <you> --email <you@example.com> --grant-project <project> --issue-token admin
+```
+
+The token is printed once: use it to log in to `/dashboard/`, then open Admin → Backups.
+
+To update: merge the feature branch into `personal/main`, push, press Deploy.
+
 ## Upgrading
 
 1. Read the upstream release notes for the new version.

@@ -1,0 +1,56 @@
+# Personal DEV Engram Cloud on Dokploy, built from this branch's source.
+# Lives only on the fork's personal/main branch; never part of upstream PRs.
+#
+# Use it to try unreleased features (e.g. cloud backups) before upstream ships them.
+# Production keeps using docker-compose.yml with the official pinned image.
+#
+# Dokploy: Compose service, source GitHub ninjoan/engram, branch personal/main,
+# compose path ./deploy/dokploy/docker-compose.dev.yml. Each Deploy rebuilds the
+# binary from the branch. Domain: service "cloud", container port 18080, HTTPS on.
+# PostgreSQL is never published: internal compose network only.
+# Use a DEDICATED database (own volume): never point dev at production data.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - engram-dev-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  cloud:
+    build:
+      context: ../..
+      dockerfile: docker/cloud/Dockerfile
+      args:
+        VERSION: ${ENGRAM_BUILD_VERSION:-personal-dev}
+    restart: unless-stopped
+    # Backups run inside the server; give a stop time above its 5s shutdown budget.
+    stop_grace_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENGRAM_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      ENGRAM_JWT_SECRET: ${ENGRAM_JWT_SECRET}
+      ENGRAM_CLOUD_TOKEN: ${ENGRAM_CLOUD_TOKEN}
+      ENGRAM_CLOUD_TOKEN_PEPPER: ${ENGRAM_CLOUD_TOKEN_PEPPER}
+      ENGRAM_CLOUD_ALLOWED_PROJECTS: ${ENGRAM_CLOUD_ALLOWED_PROJECTS}
+      ENGRAM_CLOUD_BACKUP_KEY: ${ENGRAM_CLOUD_BACKUP_KEY}
+      ENGRAM_CLOUD_PUBLIC_URL: ${ENGRAM_CLOUD_PUBLIC_URL}
+      ENGRAM_CLOUD_HOST: 0.0.0.0
+      ENGRAM_PORT: "18080"
+    expose:
+      - "18080"
+    command: ["cloud", "serve"]
+
+volumes:
+  engram-dev-pg:
